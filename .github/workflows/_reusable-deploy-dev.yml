@@ -31,10 +31,11 @@ on:
         type: boolean
 
       enable-blocking-check:
-        description: 'Check for in-progress async operations before deploying'
+        description: 'Warn on in-progress async operations before importing'
         required: false
-        default: true
+        default: false
         type: boolean
+
 
       mock-deploy:
         description: 'Dry run — skip actual import'
@@ -210,7 +211,7 @@ jobs:
       data_schema_file:       ${{ inputs.pp-data-schema-file }}
       source_environment_url: ${{ inputs.pp-sdbx-url }}
       mock_deploy:            ${{ inputs.mock-deploy == true }}
-      enable_jfrog_upload:    true
+      # enable_jfrog_upload removed — always mandatory in non-mock builds
       jfrog_url:              ${{ inputs.jfrog-url }}
       jfrog_repo:             ${{ inputs.jfrog-repo }}
     secrets: inherit
@@ -234,8 +235,7 @@ jobs:
       solution_type:                      unmanaged
       artifact_name:                      solution-${{ matrix.solution }}-${{ github.run_number }}
       enable_backup:                      ${{ inputs.enable-backup == true }}
-      enable_blocking_check:              ${{ inputs.enable-blocking-check != false }}
-      enable_version_compare:             false
+      enable_blocking_check:              ${{ inputs.enable-blocking-check == true }}
       mock_deploy:                        ${{ inputs.mock-deploy == true }}
       trigger_upgrade:                    false
       overwrite_unmanaged_customizations: true

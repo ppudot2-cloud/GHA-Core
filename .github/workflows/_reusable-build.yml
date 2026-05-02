@@ -24,7 +24,7 @@
 #   JFrog upload      → simulated (no network call)
 #
 # MANDATORY INPUTS (enforced at runtime unless mock_deploy=true):
-#   enable_jfrog_upload must be true; jfrog_url must be set.
+# Solution Checker and JFrog upload are always mandatory in non-mock builds — no toggles.
 # Solution Checker always runs in non-mock mode — there is no toggle.
 # =============================================================================
 
@@ -57,11 +57,9 @@ on:
         default: "HighIssue"
         type: string
 
-      build_version_strategy:
-        description: "Version strategy: 'run_number' (GitHub run as build) or 'gittags'"
-        required: false
-        default: "run_number"
-        type: string
+      # build_version_strategy removed — solution version is always read from
+      # Solution.xml as-is. Developers own the version number in source control.
+      # Artifact names include run_number + run_attempt for uniqueness.
 
       data_schema_file:
         description: "Relative path to Configuration Migration data schema XML (leave blank to skip)"
@@ -83,11 +81,7 @@ on:
         default: false
         type: boolean
 
-      enable_jfrog_upload:
-        description: "Upload the complete build package to JFrog Artifactory. MANDATORY unless mock_deploy=true."
-        required: false
-        default: true
-        type: boolean
+      # enable_jfrog_upload removed — JFrog upload is always mandatory in non-mock builds.
 
       jfrog_url:
         description: "JFrog Artifactory base URL (e.g. https://company.jfrog.io/artifactory)"
@@ -102,14 +96,25 @@ on:
         type: string
 
     secrets:
-      APP_ID:
-        required: false
-      CLIENT_SECRET:
-        required: false
-      TENANT_ID:
-        required: false
-      JFROG_API_KEY:
-        required: false
+      # ── Bootstrap secret (the only GitHub Secret required) ────────────────
+      # GHA_CORE_PAT is needed to checkout GHA-Core BEFORE Azure OIDC login
+      # runs. Store it in GitHub Secrets (Settings → Secrets and variables →
+      # Actions → Secrets). All other secrets come from Azure Key Vault.
+      GHA_CORE_PAT:
+        required: true
+
+      # ── All other pipeline secrets are fetched from Azure Key Vault. ───────
+      # Required GitHub repository VARIABLES (non-sensitive — Settings → Variables):
+      #   AZURE_CLIENT_ID       : App Registration client ID (Federated Identity)
+      #   AZURE_TENANT_ID       : Azure AD tenant ID
+      #   AZURE_SUBSCRIPTION_ID : Azure subscription ID
+      #   AZURE_KEY_VAULT_NAME  : Azure Key Vault name
+      #
+      # Required Azure Key Vault secrets (stored in AKV, never in GitHub):
+      #   pp-app-id        : Power Platform App Registration client ID
+      #   pp-client-secret : Power Platform App Registration client secret
+      #   pp-tenant-id     : Power Platform Azure AD tenant ID
+      #   jfrog-api-key    : JFrog Artifactory API key
 
     outputs:
       solution_version:
@@ -132,6 +137,9 @@ jobs:
   build:
     name: "Build | ${{ inputs.solution_name }}"
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # Required for OIDC Azure login (Workload Identity Federation)
+      contents: read
     outputs:
       solution_version:      ${{ steps.stamp-version.outputs.version }}
       artifact_name:         ${{ steps.set-names.outputs.artifact_name }}
@@ -146,7 +154,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      # ── 1b. Checkout GHA-Core (this repo) for shared scripts ──────────────
+      # ── 1b. Checkout GHA-Core for shared scripts ─────────────────────────
+      # Uses GHA_CORE_PAT (the one bootstrap GitHub Secret) because this
+      # checkout must happen before Azure OIDC login is possible.
       - name: Checkout GHA-Core CI scripts
         uses: actions/checkout@v4
         with:
@@ -155,14 +165,71 @@ jobs:
           path: .ci
           token: ${{ secrets.GHA_CORE_PAT }}
 
+      # ── 1c. Azure Login — OIDC (Workload Identity Federation) ────────────
+      # No client secret is stored in GitHub. Values are repository VARIABLES
+      # (non-sensitive): AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID.
+      # The Federated Identity Credential on the App Registration authenticates
+      # the GitHub Actions OIDC token automatically.
+      - name: Azure Login (OIDC — no stored credentials)
+        if: inputs.mock_deploy != true
+        uses: azure/login@v2
+        with:
+          client-id:       ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id:       ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # ── 1d. Fetch pipeline secrets from Azure Key Vault ───────────────────
+      # Retrieves all pipeline secrets in one step. Each value is masked and
+      # written to GITHUB_ENV. Subsequent steps use ${{ env.PP_APP_ID }} etc.
+      # AKV secret name  →  GITHUB_ENV variable
+      #   pp-app-id        →  PP_APP_ID
+      #   pp-client-secret →  PP_CLIENT_SECRET
+      #   pp-tenant-id     →  PP_TENANT_ID
+      #   jfrog-api-key    →  JFROG_API_KEY
+      - name: Fetch secrets from Azure Key Vault
+        if: inputs.mock_deploy != true
+        shell: pwsh
+        run: |
+          $kvName  = '${{ vars.AZURE_KEY_VAULT_NAME }}'
+          $secrets = [ordered]@{
+            'pp-app-id'        = 'PP_APP_ID'
+            'pp-client-secret' = 'PP_CLIENT_SECRET'
+            'pp-tenant-id'     = 'PP_TENANT_ID'
+            'jfrog-api-key'    = 'JFROG_API_KEY'
+          }
+          foreach ($entry in $secrets.GetEnumerator()) {
+            $value = az keyvault secret show `
+              --vault-name $kvName `
+              --name $entry.Key `
+              --query value -o tsv 2>&1
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "Failed to fetch AKV secret '$($entry.Key)': $value"
+              exit 1
+            }
+            Write-Host "::add-mask::$value"
+            "$($entry.Value)=$value" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Host "  ✔ Fetched AKV:'$($entry.Key)' → ENV:'$($entry.Value)'"
+          }
+          Write-Host "✅ All secrets fetched from Azure Key Vault: $kvName"
+
+      # ── 1e. Merge global and project variables ────────────────────────────
+      # Reads GHA-Core/global-vars.yml and the caller's project-vars.yml.
+      # Enforces that project variables cannot override protected global keys.
+      # Writes merged values to GITHUB_ENV for all subsequent steps.
+      - name: Merge global and project variables
+        shell: pwsh
+        run: |
+          pwsh .ci/.github/scripts/Merge-Variables.ps1 `
+            -GlobalVarsPath  ".ci/.github/config/global-vars.yml" `
+            -ProjectVarsPath ".github/config/project-vars.yml"
+
       # ── 2. Validate mandatory inputs ───────────────────────────────────────
       # Performs ALL checks before failing so every problem is surfaced at once.
       # Validates: solution source folder & Solution.xml, version strategy,
       # checker geo & error-level, data schema file, URL formats, and secrets
       # (APP_ID / CLIENT_SECRET / TENANT_ID / JFROG_API_KEY).
       #
-      # JFrog upload is always enabled — enable_jfrog_upload / jfrog_url are
-      # NOT validated here; they are pipeline-level constants.
+      # JFrog upload is always mandatory — no toggle. jfrog_url is validated below.
       - name: Validate mandatory inputs
         shell: pwsh
         run: |
@@ -234,17 +301,17 @@ jobs:
 
           if (-not $mock) {
             # ── Secrets (only checked in real builds — unavailable in mock) ──
-            if (-not '${{ secrets.APP_ID }}') {
-              $errors.Add("Secret APP_ID is not configured. Go to Settings → Secrets and add APP_ID.")
+            if (-not '${{ env.PP_APP_ID }}') {
+              $errors.Add("AKV secret 'pp-app-id' could not be fetched. Check Azure Key Vault access and the AKV fetch step output.")
             }
-            if (-not '${{ secrets.CLIENT_SECRET }}') {
-              $errors.Add("Secret CLIENT_SECRET is not configured. Go to Settings → Secrets and add CLIENT_SECRET.")
+            if (-not '${{ env.PP_CLIENT_SECRET }}') {
+              $errors.Add("AKV secret 'pp-client-secret' could not be fetched. Check Azure Key Vault access and the AKV fetch step output.")
             }
-            if (-not '${{ secrets.TENANT_ID }}') {
-              $errors.Add("Secret TENANT_ID is not configured. Go to Settings → Secrets and add TENANT_ID.")
+            if (-not '${{ env.PP_TENANT_ID }}') {
+              $errors.Add("AKV secret 'pp-tenant-id' could not be fetched. Check Azure Key Vault access and the AKV fetch step output.")
             }
-            if (-not '${{ secrets.JFROG_API_KEY }}') {
-              $errors.Add("Secret JFROG_API_KEY is not configured. Go to Settings → Secrets and add JFROG_API_KEY.")
+            if (-not '${{ env.JFROG_API_KEY }}') {
+              $errors.Add("AKV secret 'jfrog-api-key' could not be fetched. Check Azure Key Vault access and the AKV fetch step output.")
             }
           }
 
@@ -284,28 +351,41 @@ jobs:
         with:
           add-tools-to-path: true
 
-      # ── 4. Stamp solution version ──────────────────────────────────────────
-      - name: Stamp solution version
-        id: stamp-version
+      # ── 4. Read solution version from Solution.xml ────────────────────────
+      # The version in Solution.xml is the source of truth — the pipeline does
+      # NOT modify it. Developers bump the version in source control.
+      # Artifact uniqueness is handled via run_number + run_attempt below.
+      - name: Read solution version
+        id: stamp-version        # id kept for backward-compat with downstream refs
         shell: pwsh
         run: |
           & .ci/.github/scripts/Set-SolutionVersion.ps1 `
-            -SolutionXmlPath '${{ inputs.solution_source_folder }}/Other/Solution.xml' `
-            -VersionStrategy '${{ inputs.build_version_strategy }}' `
-            -RunNumber       '${{ github.run_number }}'
+            -SolutionXmlPath '${{ inputs.solution_source_folder }}/Other/Solution.xml'
 
       # ── 5. Set artifact and ZIP names ──────────────────────────────────────
+      # ZIP names embed the solution version (from Solution.xml) so the
+      # package is self-describing. Artifact names include run_number and
+      # run_attempt so re-runs produce distinct, non-colliding entries.
       - name: Set artifact and ZIP names
         id: set-names
         shell: pwsh
         run: |
           $sol     = '${{ inputs.solution_name }}'
           $ver     = '${{ steps.stamp-version.outputs.version }}'
+          $run     = '${{ github.run_number }}'
+          $attempt = '${{ github.run_attempt }}'
           $outDir  = "out/$sol"
+
+          # ZIP file names carry the solution version (e.g. MySol-1.2.3.4_unmanaged.zip)
           $unman   = "$outDir/${sol}-${ver}_unmanaged.zip"
           $man     = "$outDir/${sol}-${ver}_managed.zip"
-          $artName     = "solution-${sol}-${{ github.run_number }}"
-          $checkerName = "SolutionChecker-${sol}-${{ github.run_number }}"
+
+          # Artifact name: base on first attempt, append attempt number on re-runs
+          # e.g. solution-MySol-v1.2.3.4-run42   (attempt 1)
+          #      solution-MySol-v1.2.3.4-run42-a2 (re-run)
+          $artSuffix   = if ($attempt -eq '1') { "run${run}" } else { "run${run}-a${attempt}" }
+          $artName     = "solution-${sol}-v${ver}-${artSuffix}"
+          $checkerName = "SolutionChecker-${sol}-v${ver}-${artSuffix}"
 
           New-Item -ItemType Directory -Path $outDir -Force | Out-Null
           New-Item -ItemType Directory -Path "$outDir/solution-checker" -Force | Out-Null
@@ -317,10 +397,11 @@ jobs:
           "out_dir=$outDir"                     | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "checker_artifact_name=$checkerName"  | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-          Write-Host "Artifact        : $artName"
-          Write-Host "Checker artifact: $checkerName"
-          Write-Host "Unmanaged       : $unman"
-          Write-Host "Managed         : $man"
+          Write-Host "Solution version : $ver  (from Solution.xml — not modified)"
+          Write-Host "Artifact name    : $artName"
+          Write-Host "Checker artifact : $checkerName"
+          Write-Host "Unmanaged ZIP    : $unman"
+          Write-Host "Managed ZIP      : $man"
 
       # ── 6. Strip <Managed> tag from Solution.xml ──────────────────────────
       - name: Strip Managed tag
@@ -376,9 +457,9 @@ jobs:
         if: inputs.mock_deploy != true
         uses: microsoft/powerplatform-actions/check-solution@v1
         with:
-          app-id:                    ${{ secrets.APP_ID }}
-          client-secret:             ${{ secrets.CLIENT_SECRET }}
-          tenant-id:                 ${{ secrets.TENANT_ID }}
+          app-id:                    ${{ env.PP_APP_ID }}
+          client-secret:             ${{ env.PP_CLIENT_SECRET }}
+          tenant-id:                 ${{ env.PP_TENANT_ID }}
           path:                      "${{ steps.set-names.outputs.unmanaged_zip }}"
           geo:                       ${{ inputs.checker_geo }}
           fail-on-analysis-error:    true
@@ -457,9 +538,9 @@ jobs:
         uses: microsoft/powerplatform-actions/export-data@v1
         with:
           environment-url: ${{ inputs.source_environment_url }}
-          app-id:          ${{ secrets.APP_ID }}
-          client-secret:   ${{ secrets.CLIENT_SECRET }}
-          tenant-id:       ${{ secrets.TENANT_ID }}
+          app-id:          ${{ env.PP_APP_ID }}
+          client-secret:   ${{ env.PP_CLIENT_SECRET }}
+          tenant-id:       ${{ env.PP_TENANT_ID }}
           schema-file:     ${{ inputs.data_schema_file }}
           data-file:       "out/${{ inputs.solution_name }}/config/config-data.zip"
           overwrite:       true
@@ -492,10 +573,10 @@ jobs:
       # Path: {jfrog_repo}/{repo_name}/{solution_name}/{run_number}/{run_attempt}/
       - name: Upload package to JFrog Artifactory
         id: jfrog-upload-real
-        if: inputs.enable_jfrog_upload == true && inputs.mock_deploy != true
+        if: inputs.mock_deploy != true
         shell: pwsh
         env:
-          JFROG_API_KEY: ${{ secrets.JFROG_API_KEY }}
+          JFROG_API_KEY: ${{ env.JFROG_API_KEY }}
         run: |
           & .ci/.github/scripts/Invoke-JFrogAction.ps1 `
             -Action       'upload' `
@@ -512,7 +593,7 @@ jobs:
       # ── 12b. JFrog upload — SIMULATION (mock_deploy) ──────────────────────
       - name: "🧪 JFrog Artifactory upload — Simulation (mock_deploy)"
         id: jfrog-upload-sim
-        if: inputs.enable_jfrog_upload == true && inputs.mock_deploy == true
+        if: inputs.mock_deploy == true
         shell: pwsh
         run: |
           & .ci/.github/scripts/Invoke-JFrogAction.ps1 `
@@ -540,7 +621,7 @@ jobs:
             -MockDeploy        ([System.Convert]::ToBoolean('${{ inputs.mock_deploy }}')) `
             -CheckerGeo        '${{ inputs.checker_geo }}' `
             -DataSchemaFile    '${{ inputs.data_schema_file }}' `
-            -EnableJFrogUpload ([System.Convert]::ToBoolean('${{ inputs.enable_jfrog_upload }}')) `
+            -EnableJFrogUpload $true `  # Always mandatory
             -JFrogUrl          '${{ inputs.jfrog_url }}' `
             -JFrogRepo         '${{ inputs.jfrog_repo }}' `
             -JsonOutputPath    'job-summaries/build-${{ inputs.solution_name }}.json'

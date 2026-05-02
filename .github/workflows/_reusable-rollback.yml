@@ -82,17 +82,22 @@ on:
         type: string
 
     secrets:
-      APP_ID:
-        required: false
-      CLIENT_SECRET:
-        required: false
-      TENANT_ID:
-        required: false
+      # ── Bootstrap secret (the only GitHub Secret required) ────────────────
+      # GHA_CORE_PAT is needed for GHA-Core checkout before OIDC is available.
+      GHA_CORE_PAT:
+        required: true
+
+      # Required GitHub repository VARIABLES (non-sensitive):
+      #   AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, AZURE_KEY_VAULT_NAME
+      # AKV secrets: pp-app-id, pp-client-secret, pp-tenant-id
 
 jobs:
   rollback:
     name: "🔄 Rollback [${{ inputs.target-environment }}] | ${{ inputs.solution-name }} ← v${{ inputs.run-number }}"
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # Required for OIDC Azure login
+      contents: read
     environment: ${{ inputs.target-environment }}   # enforces approval gates for UAT/Perf/Prod
 
     steps:
@@ -168,7 +173,33 @@ jobs:
           "zip-path=$($zip.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           Write-Host "Backup ZIP found: $($zip.Name) ($([Math]::Round($zip.Length / 1MB, 2)) MB)"
 
-      # ── 5. Checkout caller repo (for deployment settings files) ───────────
+      # ── 5. Azure Login + Fetch AKV Secrets ────────────────────────────────
+      - name: Azure Login (OIDC — no stored credentials)
+        uses: azure/login@v2
+        with:
+          client-id:       ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id:       ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Fetch secrets from Azure Key Vault
+        shell: pwsh
+        run: |
+          $kvName  = '${{ vars.AZURE_KEY_VAULT_NAME }}'
+          $secrets = [ordered]@{
+            'pp-app-id'        = 'PP_APP_ID'
+            'pp-client-secret' = 'PP_CLIENT_SECRET'
+            'pp-tenant-id'     = 'PP_TENANT_ID'
+          }
+          foreach ($entry in $secrets.GetEnumerator()) {
+            $value = az keyvault secret show `
+              --vault-name $kvName --name $entry.Key --query value -o tsv 2>&1
+            if ($LASTEXITCODE -ne 0) { Write-Error "AKV fetch failed for '$($entry.Key)'"; exit 1 }
+            Write-Host "::add-mask::$value"
+            "$($entry.Value)=$value" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+          Write-Host "✅ AKV secrets loaded from: $kvName"
+
+      # ── 5b. Checkout caller repo (for deployment settings files) ──────────
       # actions/checkout without repository: checks out the CALLER repo (GHA-Dynamics)
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -199,9 +230,9 @@ jobs:
         uses: microsoft/powerplatform-actions/who-am-i@v1
         with:
           environment-url: ${{ steps.resolve-env.outputs.env-url }}
-          app-id:          ${{ secrets.APP_ID }}
-          client-secret:   ${{ secrets.CLIENT_SECRET }}
-          tenant-id:       ${{ secrets.TENANT_ID }}
+          app-id:          ${{ env.PP_APP_ID }}
+          client-secret:   ${{ env.PP_CLIENT_SECRET }}
+          tenant-id:       ${{ env.PP_TENANT_ID }}
 
       # ── 9a. Import backup — Unmanaged (Dev only) ───────────────────────────
       - name: "Import backup — Unmanaged (Dev)"
@@ -210,9 +241,9 @@ jobs:
         uses: microsoft/powerplatform-actions/import-solution@v1
         with:
           environment-url:               ${{ steps.resolve-env.outputs.env-url }}
-          app-id:                        ${{ secrets.APP_ID }}
-          client-secret:                 ${{ secrets.CLIENT_SECRET }}
-          tenant-id:                     ${{ secrets.TENANT_ID }}
+          app-id:                        ${{ env.PP_APP_ID }}
+          client-secret:                 ${{ env.PP_CLIENT_SECRET }}
+          tenant-id:                     ${{ env.PP_TENANT_ID }}
           solution-file:                 ${{ steps.locate-zip.outputs.zip-path }}
           force-overwrite:               true
           publish-changes:               true
@@ -229,9 +260,9 @@ jobs:
         uses: microsoft/powerplatform-actions/import-solution@v1
         with:
           environment-url:               ${{ steps.resolve-env.outputs.env-url }}
-          app-id:                        ${{ secrets.APP_ID }}
-          client-secret:                 ${{ secrets.CLIENT_SECRET }}
-          tenant-id:                     ${{ secrets.TENANT_ID }}
+          app-id:                        ${{ env.PP_APP_ID }}
+          client-secret:                 ${{ env.PP_CLIENT_SECRET }}
+          tenant-id:                     ${{ env.PP_TENANT_ID }}
           solution-file:                 ${{ steps.locate-zip.outputs.zip-path }}
           force-overwrite:               true
           activate-plugins:              true
@@ -248,9 +279,9 @@ jobs:
         uses: microsoft/powerplatform-actions/publish-solution@v1
         with:
           environment-url:     ${{ steps.resolve-env.outputs.env-url }}
-          app-id:              ${{ secrets.APP_ID }}
-          client-secret:       ${{ secrets.CLIENT_SECRET }}
-          tenant-id:           ${{ secrets.TENANT_ID }}
+          app-id:              ${{ env.PP_APP_ID }}
+          client-secret:       ${{ env.PP_CLIENT_SECRET }}
+          tenant-id:           ${{ env.PP_TENANT_ID }}
           run-asynchronously:  true
           max-async-wait-time: 60
 
