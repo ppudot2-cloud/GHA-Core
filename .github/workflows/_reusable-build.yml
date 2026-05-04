@@ -223,126 +223,254 @@ jobs:
             -GlobalVarsPath  ".ci/.github/config/global-vars.yml" `
             -ProjectVarsPath ".github/config/project-vars.yml"
 
-      # ── 2. Validate mandatory inputs ───────────────────────────────────────
-      # Performs ALL checks before failing so every problem is surfaced at once.
-      # Validates: solution source folder & Solution.xml, version strategy,
-      # checker geo & error-level, data schema file, URL formats, and secrets
-      # (APP_ID / CLIENT_SECRET / TENANT_ID / JFROG_API_KEY).
-      #
-      # JFrog upload is always mandatory — no toggle. jfrog_url is validated below.
-      - name: Validate mandatory inputs
+      # ── 2. Pre-flight validation ────────────────────────────────────────────
+      # Collects ALL errors before failing — every issue is surfaced at once.
+      # Runs 5 sections:
+      #   §1 Core inputs   : solution_name, solution_source_folder, Solution.xml
+      #   §2 Checker config: checker_geo (valid geo list), checker_error_level
+      #   §3 Config export : data_schema_file exists, source_environment_url
+      #                      required when schema set, Dataverse URL format
+      #   §4 JFrog         : jfrog_url non-empty + https:// format,
+      #                      jfrog_repo non-empty, live /api/system/ping
+      #   §5 Secrets/Vars  : Azure repo variables (CLIENT_ID, TENANT_ID,
+      #                      SUBSCRIPTION_ID, KEY_VAULT_NAME) + AKV-fetched
+      #                      secrets (PP_APP_ID GUID, PP_CLIENT_SECRET,
+      #                      PP_TENANT_ID GUID, JFROG_API_KEY)
+      # §4 live ping and §5 are skipped in mock_deploy mode.
+      - name: Pre-flight validation
         shell: pwsh
         run: |
           $mock     = [System.Convert]::ToBoolean('${{ inputs.mock_deploy }}')
           $errors   = [System.Collections.Generic.List[string]]::new()
           $warnings = [System.Collections.Generic.List[string]]::new()
+          $checks   = [System.Collections.Generic.List[string]]::new()
 
-          # ── solution_name ──────────────────────────────────────────────────
-          if (-not '${{ inputs.solution_name }}'.Trim()) {
-            $errors.Add("solution_name is required and must not be empty.")
-          }
+          function Pass([string]$msg) { $script:checks.Add("  ✅ $msg") }
+          function Fail([string]$msg) { $script:errors.Add($msg); $script:checks.Add("  ❌ $msg") }
+          function Warn([string]$msg) { $script:warnings.Add($msg); $script:checks.Add("  ⚠️  $msg") }
+          function Skip([string]$msg) { $script:checks.Add("  ⏭️  $msg") }
 
-          # ── solution_source_folder + Solution.xml ─────────────────────────
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          Write-Host "  PRE-FLIGHT VALIDATION  (mock=$mock)"
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          # ──────────────────────────────────────────────────────────────────
+          # §1  CORE INPUTS
+          # ──────────────────────────────────────────────────────────────────
+          Write-Host "`n§1  Core Inputs"
+
+          $solName = '${{ inputs.solution_name }}'.Trim()
+          if ($solName) { Pass "solution_name = '$solName'" }
+          else          { Fail "solution_name is required and must not be empty." }
+
           $srcFolder = '${{ inputs.solution_source_folder }}'.Trim()
           if (-not $srcFolder) {
-            $errors.Add("solution_source_folder is required.")
+            Fail "solution_source_folder is required."
+          } elseif (-not (Test-Path $srcFolder)) {
+            Fail "solution_source_folder '$srcFolder' does not exist in the repository."
           } else {
-            if (-not (Test-Path $srcFolder)) {
-              $errors.Add("solution_source_folder '$srcFolder' does not exist in the repository.")
-            } else {
-              $solutionXml = Join-Path $srcFolder 'Other/Solution.xml'
-              if (-not (Test-Path $solutionXml)) {
-                $errors.Add("Solution.xml not found at '$solutionXml'. Verify this is a valid unpacked solution folder (expected: $srcFolder/Other/Solution.xml).")
-              }
-            }
+            Pass "solution_source_folder '$srcFolder' — directory exists"
+            $solutionXml = Join-Path $srcFolder 'Other/Solution.xml'
+            if (Test-Path $solutionXml) { Pass "Solution.xml found at '$solutionXml'" }
+            else { Fail "Solution.xml not found at '$solutionXml' — is this a valid unpacked solution folder?" }
           }
 
-          # ── build_version_strategy ────────────────────────────────────────
-          $validStrategies = @('run_number', 'gittags')
-          $strategy = '${{ inputs.build_version_strategy }}'
-          if ($strategy -notin $validStrategies) {
-            $errors.Add("build_version_strategy '$strategy' is invalid. Accepted values: $($validStrategies -join ', ').")
-          }
+          # ──────────────────────────────────────────────────────────────────
+          # §2  SOLUTION CHECKER CONFIGURATION
+          # ──────────────────────────────────────────────────────────────────
+          Write-Host "`n§2  Solution Checker Configuration"
 
-          # ── checker_geo ───────────────────────────────────────────────────
           $validGeos = @(
             'UnitedStates','Europe','Asia','Australia','Japan','India','Canada',
             'SouthAmerica','UnitedKingdom','France','Germany','UnitedArabEmirates',
             'Switzerland','Korea','Norway','SouthAfrica','Qatar'
           )
           $geo = '${{ inputs.checker_geo }}'
-          if ($geo -notin $validGeos) {
-            $errors.Add("checker_geo '$geo' is not a valid geography. Valid values: $($validGeos -join ', ').")
-          }
+          if ($geo -in $validGeos) { Pass "checker_geo = '$geo'" }
+          else { Fail "checker_geo '$geo' is not a recognised geography. Valid values: $($validGeos -join ', ')." }
 
-          # ── checker_error_level ───────────────────────────────────────────
           $validLevels = @('CriticalIssue','HighIssue','MediumIssue','LowIssue','InformationalIssue')
           $level = '${{ inputs.checker_error_level }}'
-          if ($level -notin $validLevels) {
-            $errors.Add("checker_error_level '$level' is invalid. Valid values: $($validLevels -join ', ').")
-          }
+          if ($level -in $validLevels) { Pass "checker_error_level = '$level'" }
+          else { Fail "checker_error_level '$level' is not valid. Valid values: $($validLevels -join ', ')." }
 
-          # ── data_schema_file (if provided) ────────────────────────────────
+          # ──────────────────────────────────────────────────────────────────
+          # §3  CONFIG DATA EXPORT
+          # ──────────────────────────────────────────────────────────────────
+          Write-Host "`n§3  Config Data Export"
+
           $schema = '${{ inputs.data_schema_file }}'.Trim()
-          if ($schema) {
-            if (-not (Test-Path $schema)) {
-              $errors.Add("data_schema_file '$schema' does not exist in the repository.")
-            }
-            if (-not '${{ inputs.source_environment_url }}'.Trim()) {
-              $errors.Add("source_environment_url is required when data_schema_file is provided (needed for config data export).")
-            }
-          }
-
-          # ── source_environment_url format (if provided) ───────────────────
           $srcUrl = '${{ inputs.source_environment_url }}'.Trim()
-          if ($srcUrl -and $srcUrl -notmatch '^https://[a-zA-Z0-9][a-zA-Z0-9\-]*\.crm[0-9]*\.dynamics\.com/?$') {
-            $warnings.Add("source_environment_url '$srcUrl' does not match the expected Dataverse URL pattern (https://<org>.crm[N].dynamics.com). Verify it is correct.")
+
+          if (-not $schema) {
+            Skip "data_schema_file not provided — config data export will be skipped"
+          } else {
+            if (Test-Path $schema) { Pass "data_schema_file '$schema' — file exists" }
+            else { Fail "data_schema_file '$schema' does not exist in the repository." }
+
+            if ($srcUrl) { Pass "source_environment_url is set (required when data_schema_file is provided)" }
+            else { Fail "source_environment_url is required when data_schema_file is set (needed for config data export)." }
           }
 
-          if (-not $mock) {
-            # ── Secrets (only checked in real builds — unavailable in mock) ──
-            if (-not '${{ env.PP_APP_ID }}') {
-              $errors.Add("AKV secret 'pp-app-id' could not be fetched. Check Azure Key Vault access and the AKV fetch step output.")
-            }
-            if (-not '${{ env.PP_CLIENT_SECRET }}') {
-              $errors.Add("AKV secret 'pp-client-secret' could not be fetched. Check Azure Key Vault access and the AKV fetch step output.")
-            }
-            if (-not '${{ env.PP_TENANT_ID }}') {
-              $errors.Add("AKV secret 'pp-tenant-id' could not be fetched. Check Azure Key Vault access and the AKV fetch step output.")
-            }
-            if (-not '${{ env.JFROG_API_KEY }}') {
-              $errors.Add("AKV secret 'jfrog-api-key' could not be fetched. Check Azure Key Vault access and the AKV fetch step output.")
+          if ($srcUrl) {
+            if ($srcUrl -match '^https://[a-zA-Z0-9][a-zA-Z0-9\-]*\.crm[0-9]*\.dynamics\.com/?$') {
+              Pass "source_environment_url format is valid"
+            } else {
+              Warn "source_environment_url '$srcUrl' does not match the expected Dataverse pattern (https://<org>.crm[N].dynamics.com). Verify it is correct."
             }
           }
 
-          # ── Report all findings ───────────────────────────────────────────
-          foreach ($w in $warnings) { Write-Host "::warning::$w" }
-          foreach ($e in $errors)   { Write-Host "::error::$e"   }
+          # ──────────────────────────────────────────────────────────────────
+          # §4  JFROG ARTIFACTORY
+          # ──────────────────────────────────────────────────────────────────
+          Write-Host "`n§4  JFrog Artifactory"
+
+          $jfrogUrl  = '${{ inputs.jfrog_url }}'.Trim()
+          $jfrogRepo = '${{ inputs.jfrog_repo }}'.Trim()
+          $jfrogUrlOk = $false
+
+          if (-not $jfrogUrl) {
+            Fail "jfrog_url is required. Set the JFROG_URL repository variable and pass it to this workflow."
+          } elseif ($jfrogUrl -notmatch '^https://') {
+            Fail "jfrog_url '$jfrogUrl' must start with https://."
+          } else {
+            Pass "jfrog_url = '$jfrogUrl' (format OK)"
+            $jfrogUrlOk = $true
+          }
+
+          if ($jfrogRepo) { Pass "jfrog_repo = '$jfrogRepo'" }
+          else { Fail "jfrog_repo is required and must not be empty." }
+
+          if ($mock) {
+            Skip "JFrog live connectivity check — skipped in mock_deploy mode"
+          } elseif ($jfrogUrlOk) {
+            Write-Host "  🔌 Pinging $jfrogUrl/api/system/ping ..."
+            try {
+              $headers = @{ 'X-JFrog-Art-Api' = $env:JFROG_API_KEY }
+              $resp = Invoke-WebRequest -Uri "$jfrogUrl/api/system/ping" `
+                        -Headers $headers -Method GET -TimeoutSec 15 -ErrorAction Stop
+              if ($resp.StatusCode -eq 200 -and ($resp.Content -match 'OK' -or $resp.StatusCode -eq 200)) {
+                Pass "JFrog connectivity — ping OK (HTTP $($resp.StatusCode))"
+              } else {
+                Fail "JFrog ping returned unexpected response: HTTP $($resp.StatusCode) body='$($resp.Content.Trim())'"
+              }
+            } catch {
+              Fail "JFrog connectivity check FAILED: $($_.Exception.Message). Verify jfrog_url is reachable and JFROG_API_KEY is correct."
+            }
+          } else {
+            Skip "JFrog connectivity check — skipped (jfrog_url invalid)"
+          }
+
+          # ──────────────────────────────────────────────────────────────────
+          # §5  SECRETS & AZURE REPOSITORY VARIABLES
+          # Skipped in mock_deploy mode (secrets are not injected for mock runs).
+          # NOTE: AKV-fetched secrets are read via $env: (PowerShell env vars
+          #       written to GITHUB_ENV by the 'Fetch secrets' step above).
+          #       Do NOT use ${{ env.* }} here — that expression is expanded
+          #       before the script runs and masked values appear as '***'.
+          # ──────────────────────────────────────────────────────────────────
+          Write-Host "`n§5  Secrets & Azure Repository Variables"
+
+          if ($mock) {
+            Skip "All secret and Azure-variable checks skipped in mock_deploy mode"
+          } else {
+            $guidPattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+
+            # Azure repository variables (non-sensitive, stored in GitHub Variables)
+            $akvName  = '${{ vars.AZURE_KEY_VAULT_NAME }}'
+            $aClientId = '${{ vars.AZURE_CLIENT_ID }}'
+            $aTenantId = '${{ vars.AZURE_TENANT_ID }}'
+            $aSubId    = '${{ vars.AZURE_SUBSCRIPTION_ID }}'
+
+            if ($akvName)  { Pass "AZURE_KEY_VAULT_NAME variable set = '$akvName'" }
+            else           { Fail "AZURE_KEY_VAULT_NAME repository variable is not set — required for AKV secret fetch." }
+
+            if (-not $aClientId) {
+              Fail "AZURE_CLIENT_ID repository variable is not set — required for OIDC Azure login."
+            } elseif ($aClientId -match $guidPattern) {
+              Pass "AZURE_CLIENT_ID is set and is a valid GUID"
+            } else {
+              Warn "AZURE_CLIENT_ID '$aClientId' does not look like a GUID — verify it is the App Registration client ID."
+            }
+
+            if (-not $aTenantId) {
+              Fail "AZURE_TENANT_ID repository variable is not set — required for OIDC Azure login."
+            } elseif ($aTenantId -match $guidPattern) {
+              Pass "AZURE_TENANT_ID is set and is a valid GUID"
+            } else {
+              Warn "AZURE_TENANT_ID '$aTenantId' does not look like a GUID — verify it is the Azure AD tenant ID."
+            }
+
+            if ($aSubId) { Pass "AZURE_SUBSCRIPTION_ID variable set" }
+            else         { Fail "AZURE_SUBSCRIPTION_ID repository variable is not set — required for OIDC Azure login." }
+
+            # AKV-fetched secrets (written to GITHUB_ENV by the Fetch-Secrets step)
+            $ppAppId        = $env:PP_APP_ID
+            $ppClientSecret = $env:PP_CLIENT_SECRET
+            $ppTenantId     = $env:PP_TENANT_ID
+            $jfrogApiKey    = $env:JFROG_API_KEY
+
+            if (-not $ppAppId) {
+              Fail "PP_APP_ID is empty — AKV secret 'pp-app-id' was not fetched. Check Key Vault access and the 'Fetch secrets from Azure Key Vault' step output."
+            } elseif ($ppAppId -match $guidPattern) {
+              Pass "PP_APP_ID fetched from AKV and is a valid GUID"
+            } else {
+              Warn "PP_APP_ID does not look like a GUID — verify AKV secret 'pp-app-id' contains the App Registration client ID."
+            }
+
+            if ($ppClientSecret) { Pass "PP_CLIENT_SECRET fetched from AKV (non-empty)" }
+            else { Fail "PP_CLIENT_SECRET is empty — AKV secret 'pp-client-secret' was not fetched. Check Key Vault access." }
+
+            if (-not $ppTenantId) {
+              Fail "PP_TENANT_ID is empty — AKV secret 'pp-tenant-id' was not fetched. Check Key Vault access."
+            } elseif ($ppTenantId -match $guidPattern) {
+              Pass "PP_TENANT_ID fetched from AKV and is a valid GUID"
+            } else {
+              Warn "PP_TENANT_ID does not look like a GUID — verify AKV secret 'pp-tenant-id' contains the tenant ID."
+            }
+
+            if ($jfrogApiKey) { Pass "JFROG_API_KEY fetched from AKV (non-empty)" }
+            else { Fail "JFROG_API_KEY is empty — AKV secret 'jfrog-api-key' was not fetched. Check Key Vault access." }
+          }
+
+          # ──────────────────────────────────────────────────────────────────
+          # SUMMARY REPORT
+          # ──────────────────────────────────────────────────────────────────
+          Write-Host ""
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          Write-Host "  VALIDATION RESULTS"
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          foreach ($line in $checks) { Write-Host $line }
+          Write-Host ""
+
+          if ($warnings.Count -gt 0) {
+            Write-Host "⚠️  $($warnings.Count) warning(s) — build will continue:"
+            foreach ($w in $warnings) { Write-Host "::warning::$w" }
+          }
 
           if ($errors.Count -gt 0) {
+            Write-Host "❌ $($errors.Count) error(s) found — build BLOCKED:"
+            foreach ($e in $errors) { Write-Host "::error::$e" }
             Write-Host ""
-            Write-Host "::error::Validation failed — $($errors.Count) error(s) found above. Fix all issues before re-running."
+            Write-Host "::error::Pre-flight validation failed — $($errors.Count) error(s) above. Fix all issues and re-run."
 
-            # Write failure summary
             @"
-          ## ❌ Build Validation Failed — $($errors.Count) Error(s)
-          | # | Error |
-          | --- | --- |
-          $(($errors | ForEach-Object -Begin { $i=0 } -Process { $i++; "| $i | $_ |" }) -join "`n")
+## ❌ Pre-flight Validation Failed — $($errors.Count) Error(s)
 
-          $(if ($warnings.Count -gt 0) {
-          @"
-          ### ⚠️ Warnings ($($warnings.Count))
-          $(($warnings | ForEach-Object { "- $_" }) -join "`n")
-          "@
-          })
-          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+| # | Error |
+| --- | --- |
+$(($errors | ForEach-Object -Begin { $i=0 } -Process { $i++; "| $i | $_ |" }) -join "`n")
+
+$(if ($warnings.Count -gt 0) {
+  "### ⚠️ Warnings ($($warnings.Count))`n" + (($warnings | ForEach-Object { "- $_" }) -join "`n")
+})
+"@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
             exit 1
           }
 
-          $status = "✅ All checks passed"
-          if ($warnings.Count -gt 0) { $status += " ($($warnings.Count) warning(s))" }
-          Write-Host "$status — mock=$mock  jfrog=$jfrog  solution='${{ inputs.solution_name }}'"
+          $result = "✅ Pre-flight validation passed"
+          if ($warnings.Count -gt 0) { $result += " — $($warnings.Count) warning(s), see above" }
+          Write-Host $result
 
       # ── 3. Install PAC CLI (skipped in mock mode) ──────────────────────────
       - name: Install PAC CLI
