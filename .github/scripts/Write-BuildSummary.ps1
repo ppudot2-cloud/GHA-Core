@@ -39,8 +39,8 @@
 #>
 param(
     [Parameter(Mandatory)][string] $SolutionName,
-    [Parameter(Mandatory)][string] $SolutionVersion,
-    [Parameter(Mandatory)][string] $ArtifactName,
+    [Parameter(Mandatory)][AllowEmptyString()][string] $SolutionVersion,
+    [Parameter(Mandatory)][AllowEmptyString()][string] $ArtifactName,
     [Parameter(Mandatory)][string] $RunNumber,
     [bool]   $MockDeploy        = $false,
     [string] $CheckerGeo        = 'UnitedStates',
