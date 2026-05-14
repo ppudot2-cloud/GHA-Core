@@ -1,0 +1,87 @@
+name: 'Pre-Deploy Checks'
+description: 'Runs blocking checks and version comparison before importing a solution'
+
+inputs:
+  solution_name:
+    description: 'Name of the solution'
+    required: true
+  environment_url:
+    description: 'Target Power Platform environment URL'
+    required: true
+  artifact_name:
+    description: 'Artifact identifier used to derive version string'
+    required: true
+  enable_blocking_check:
+    description: 'Run blocking-check script (detects active flows, ownership locks, etc.)'
+    required: false
+    default: 'true'
+  enable_version_compare:
+    description: 'Skip import if the same or higher version is already installed'
+    required: false
+    default: 'true'
+  base_solutions:
+    description: 'Comma-separated list of base solution names to verify are present'
+    required: false
+    default: ''
+  mock_deploy:
+    description: 'If true, skip actual environment connectivity checks'
+    required: false
+    default: 'false'
+
+outputs:
+  skip_import:
+    description: 'true if version compare determined import should be skipped'
+    value: ${{ steps.version-compare.outputs.skip_import }}
+
+runs:
+  using: composite
+  steps:
+    - name: Verify base solutions present
+      if: ${{ inputs.base_solutions != '' && inputs.mock_deploy != 'true' }}
+      shell: pwsh
+      run: |
+        $bases = "${{ inputs.base_solutions }}" -split ','
+        foreach ($base in $bases) {
+          $base = $base.Trim()
+          Write-Host "Verifying base solution '$base' is installed in ${{ inputs.environment_url }}..."
+          # Uses PAC CLI — fails job if solution not found
+          pac solution list --environment "${{ inputs.environment_url }}" | Select-String $base
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Base solution '$base' not found in environment. Cannot proceed."
+            exit 1
+          }
+        }
+
+    - name: Run blocking check
+      if: ${{ inputs.enable_blocking_check == 'true' && inputs.mock_deploy != 'true' }}
+      shell: pwsh
+      run: |
+        $scriptPath = ".ci/templates/steps/dynamics/Invoke-BlockingCheck.ps1"
+        & $scriptPath `
+          -SolutionName "${{ inputs.solution_name }}" `
+          -EnvironmentUrl "${{ inputs.environment_url }}" `
+          -AppId "${{ env.PP_APP_ID }}" `
+          -ClientSecret "${{ env.PP_CLIENT_SECRET }}" `
+          -TenantId "${{ env.PP_TENANT_ID }}"
+
+    - name: Compare solution version
+      id: version-compare
+      if: ${{ inputs.enable_version_compare == 'true' && inputs.mock_deploy != 'true' }}
+      shell: pwsh
+      run: |
+        $scriptPath = ".ci/templates/steps/dynamics/Compare-SolutionVersion.ps1"
+        $result = & $scriptPath `
+          -SolutionName "${{ inputs.solution_name }}" `
+          -ArtifactName "${{ inputs.artifact_name }}" `
+          -EnvironmentUrl "${{ inputs.environment_url }}" `
+          -AppId "${{ env.PP_APP_ID }}" `
+          -ClientSecret "${{ env.PP_CLIENT_SECRET }}" `
+          -TenantId "${{ env.PP_TENANT_ID }}"
+        echo "skip_import=$result" >> $env:GITHUB_OUTPUT
+
+    - name: Pre-deploy checks (mock)
+      if: ${{ inputs.mock_deploy == 'true' }}
+      shell: pwsh
+      run: |
+        Write-Host "[MOCK] Pre-deploy checks skipped — mock_deploy=true" -ForegroundColor Cyan
+        echo "skip_import=false" >> $env:GITHUB_OUTPUT

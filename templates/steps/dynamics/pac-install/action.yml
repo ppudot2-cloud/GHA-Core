@@ -1,0 +1,13 @@
+# =============================================================================
+# COMPOSITE ACTION: Install PAC CLI
+# =============================================================================
+name: 'Install PAC CLI'
+description: 'Install Power Platform CLI (PAC) and add to PATH'
+
+runs:
+  using: composite
+  steps:
+    - name: Install PAC CLI
+      uses: microsoft/powerplatform-actions/actions-install@v1
+      with:
+        add-tools-to-path: true

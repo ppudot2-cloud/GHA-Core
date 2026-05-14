@@ -1,0 +1,89 @@
+# =============================================================================
+# COMPOSITE ACTION: Solution Checker
+# =============================================================================
+# Runs the Power Platform Solution Checker (always mandatory in non-mock mode).
+# Real mode: uses microsoft/powerplatform-actions/check-solution.
+# Mock mode: uses Invoke-SolutionCheckerSim.ps1 (no PP credentials needed).
+# PP credentials (PP_APP_ID, PP_CLIENT_SECRET, PP_TENANT_ID) are read from
+# GITHUB_ENV — set by the ci-bootstrap action.
+# =============================================================================
+name: 'Solution Checker'
+description: 'Run Power Platform Solution Checker (real or simulated). Always mandatory.'
+
+inputs:
+  solution_name:
+    required: true
+  unmanaged_zip:
+    required: true
+  managed_zip:
+    required: true
+  checker_geo:
+    required: false
+    default: 'UnitedStates'
+  checker_error_level:
+    required: false
+    default: 'HighIssue'
+  checker_artifact_name:
+    required: true
+  mock_deploy:
+    required: false
+    default: 'false'
+  out_dir:
+    required: true
+    description: 'Solution output directory (e.g. out/MySolution)'
+
+runs:
+  using: composite
+  steps:
+    - name: Run Solution Checker — Real
+      id: solution-checker-real
+      if: ${{ inputs.mock_deploy != 'true' }}
+      uses: microsoft/powerplatform-actions/check-solution@v1
+      with:
+        app-id:                     ${{ env.PP_APP_ID }}
+        client-secret:              ${{ env.PP_CLIENT_SECRET }}
+        tenant-id:                  ${{ env.PP_TENANT_ID }}
+        path:                       ${{ inputs.unmanaged_zip }}
+        geo:                        ${{ inputs.checker_geo }}
+        fail-on-analysis-error:     true
+        error-level:                ${{ inputs.checker_error_level }}
+        checker-logs-artifact-name: ${{ inputs.checker_artifact_name }}
+
+    - name: Copy checker report to output folder
+      if: ${{ inputs.mock_deploy != 'true' }}
+      shell: pwsh
+      run: |
+        $destDir = "${{ inputs.out_dir }}/solution-checker"
+        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+        $searchRoots = @($env:RUNNER_TEMP, "${{ github.workspace }}", ".")
+        $found = @()
+        foreach ($root in $searchRoots) {
+          if ($root -and (Test-Path $root)) {
+            $files = Get-ChildItem -Path $root -Recurse -Include "*.sarif","*.sarif.json" `
+                       -ErrorAction SilentlyContinue |
+                     Where-Object { $_.FullName -notlike "*$destDir*" }
+            $found += $files
+          }
+        }
+        if ($found.Count -gt 0) {
+          foreach ($f in $found) {
+            Copy-Item -Path $f.FullName -Destination $destDir -Force
+            Write-Host "✅ Copied checker report: $($f.Name) → $destDir/"
+          }
+        } else {
+          $placeholder = "$destDir/checker-summary.txt"
+          "Solution Checker completed. No SARIF file located on runner. See artifact '${{ inputs.checker_artifact_name }}'." |
+            Set-Content -Path $placeholder -Encoding UTF8
+          Write-Host "::notice::No SARIF file found — placeholder written."
+        }
+
+    - name: Run Solution Checker — Simulation (mock_deploy)
+      if: ${{ inputs.mock_deploy == 'true' }}
+      shell: pwsh
+      run: |
+        & .ci/templates/steps/dynamics/Invoke-SolutionCheckerSim.ps1 `
+          -SolutionName  '${{ inputs.solution_name }}' `
+          -UnmanagedZip  '${{ inputs.unmanaged_zip }}' `
+          -ManagedZip    '${{ inputs.managed_zip }}' `
+          -CheckerGeo    '${{ inputs.checker_geo }}' `
+          -ErrorLevel    '${{ inputs.checker_error_level }}'

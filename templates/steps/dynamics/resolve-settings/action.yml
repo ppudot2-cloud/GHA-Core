@@ -1,0 +1,85 @@
+name: 'Resolve Deployment Settings'
+description: 'Downloads the solution artifact from JFrog and resolves deployment-settings token substitution'
+
+inputs:
+  solution_name:
+    description: 'Name of the solution'
+    required: true
+  artifact_name:
+    description: 'Artifact identifier (e.g. MySolution_1.0.20240101.1)'
+    required: true
+  environment_name:
+    description: 'Target environment name (Dev, Intg, UAT, FRS, Perf, Prod)'
+    required: true
+  deployment_settings_file:
+    description: 'Path to the deployment-settings JSON for this environment/solution'
+    required: false
+    default: ''
+  jfrog_url:
+    description: 'JFrog Artifactory base URL'
+    required: true
+  jfrog_repo:
+    description: 'JFrog repository name'
+    required: true
+  run_number:
+    description: 'GitHub run number'
+    required: true
+  run_attempt:
+    description: 'GitHub run attempt number'
+    required: true
+  mock_deploy:
+    description: 'If true, skip JFrog download and use local artifact'
+    required: false
+    default: 'false'
+
+outputs:
+  managed_zip:
+    description: 'Path to the downloaded managed solution zip'
+    value: ${{ steps.set-paths.outputs.managed_zip }}
+  settings_file_resolved:
+    description: 'Path to the token-substituted deployment settings file'
+    value: ${{ steps.set-paths.outputs.settings_file_resolved }}
+
+runs:
+  using: composite
+  steps:
+    - name: Download artifact from JFrog
+      shell: pwsh
+      run: |
+        $scriptPath = ".ci/templates/steps/dynamics/Invoke-JFrogAction.ps1"
+        & $scriptPath `
+          -Action "download" `
+          -SolutionName "${{ inputs.solution_name }}" `
+          -ArtifactName "${{ inputs.artifact_name }}" `
+          -JFrogUrl "${{ inputs.jfrog_url }}" `
+          -JFrogRepo "${{ inputs.jfrog_repo }}" `
+          -RunNumber "${{ inputs.run_number }}" `
+          -RunAttempt "${{ inputs.run_attempt }}" `
+          -MockDeploy:$${{ inputs.mock_deploy == 'true' }} `
+          -JFrogToken "${{ env.JFROG_TOKEN }}"
+
+    - name: Resolve deployment settings tokens
+      id: set-paths
+      shell: pwsh
+      run: |
+        $managedZip = "out/${{ inputs.artifact_name }}/${{ inputs.solution_name }}_managed.zip"
+        $settingsResolved = ""
+        if ("${{ inputs.deployment_settings_file }}" -ne "") {
+          $settingsResolved = "out/${{ inputs.artifact_name }}/deployment-settings-resolved.json"
+          # Token substitution: replace #{VAR_NAME}# with env var value
+          $content = Get-Content "${{ inputs.deployment_settings_file }}" -Raw
+          $matches = [regex]::Matches($content, '#\{([^}]+)\}#')
+          foreach ($m in $matches) {
+            $varName = $m.Groups[1].Value
+            $varValue = [System.Environment]::GetEnvironmentVariable($varName)
+            if ($null -ne $varValue) {
+              $content = $content.Replace($m.Value, $varValue)
+            } else {
+              Write-Warning "Token $($m.Value) has no matching env var '$varName' — leaving unreplaced"
+            }
+          }
+          $content | Set-Content $settingsResolved
+          Write-Host "Resolved deployment settings written to: $settingsResolved"
+        }
+        echo "managed_zip=$managedZip" >> $env:GITHUB_OUTPUT
+        echo "settings_file_resolved=$settingsResolved" >> $env:GITHUB_OUTPUT

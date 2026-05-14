@@ -1,0 +1,68 @@
+name: 'Export Solution from Environment'
+description: >
+  Exports a solution from a Power Platform environment, unpacks it to a local
+  source folder, and outputs the folder path for the pack-solution step to consume.
+  In mock mode the existing src/solutions/<name> tree is reused unchanged.
+
+inputs:
+  solution_name:
+    description: 'Name of the Power Platform solution to export'
+    required: true
+  source_environment_url:
+    description: 'URL of the Power Platform environment to export from (usually the sandbox)'
+    required: true
+  export_folder:
+    description: 'Local folder to unpack the exported solution into'
+    required: false
+    default: 'export-src'
+  mock_deploy:
+    description: 'If true, skip the actual export and reuse existing source tree'
+    required: false
+    default: 'false'
+
+outputs:
+  source_folder:
+    description: 'Path to the unpacked solution source (pass as solution_source_folder to pack-solution)'
+    value: ${{ steps.set-source.outputs.source_folder }}
+
+runs:
+  using: composite
+  steps:
+    - name: Export unmanaged solution
+      if: ${{ inputs.mock_deploy != 'true' }}
+      uses: microsoft/powerplatform-actions/export-solution@v1
+      with:
+        environment-url: ${{ inputs.source_environment_url }}
+        app-id:          ${{ env.PP_APP_ID }}
+        client-secret:   ${{ env.PP_CLIENT_SECRET }}
+        tenant-id:       ${{ env.PP_TENANT_ID }}
+        solution-name:   ${{ inputs.solution_name }}
+        solution-output-file: ${{ inputs.export_folder }}/zips/${{ inputs.solution_name }}_unmanaged_raw.zip
+        managed: false
+
+    - name: Unpack exported solution to source tree
+      if: ${{ inputs.mock_deploy != 'true' }}
+      uses: microsoft/powerplatform-actions/unpack-solution@v1
+      with:
+        solution-file:       ${{ inputs.export_folder }}/zips/${{ inputs.solution_name }}_unmanaged_raw.zip
+        solution-folder:     ${{ inputs.export_folder }}/${{ inputs.solution_name }}
+        solution-type:       Unmanaged
+        process-canvas-apps: true
+        overwrite-files:     true
+
+    - name: Mock export (reuse existing source tree)
+      if: ${{ inputs.mock_deploy == 'true' }}
+      shell: pwsh
+      run: |
+        Write-Host "[MOCK] Export from ${{ inputs.source_environment_url }} simulated." -ForegroundColor Cyan
+        Write-Host "       Source tree: src/solutions/${{ inputs.solution_name }}" -ForegroundColor Cyan
+
+    - name: Set source folder output
+      id: set-source
+      shell: bash
+      run: |
+        if [ "${{ inputs.mock_deploy }}" = "true" ]; then
+          echo "source_folder=src/solutions" >> "$GITHUB_OUTPUT"
+        else
+          echo "source_folder=${{ inputs.export_folder }}" >> "$GITHUB_OUTPUT"
+        fi

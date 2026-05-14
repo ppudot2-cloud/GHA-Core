@@ -1,0 +1,124 @@
+# =============================================================================
+# COMPOSITE ACTION: Pack Solution
+# =============================================================================
+# Reads version from Solution.xml, computes artifact names, strips the
+# <Managed> tag, then packs both unmanaged and managed ZIPs.
+# Supports real (PAC CLI) and mock (PowerShell simulation) modes.
+# =============================================================================
+name: 'Pack Solution'
+description: 'Read version, set artifact names, strip Managed tag, pack unmanaged + managed ZIPs'
+
+inputs:
+  solution_name:
+    required: true
+  solution_source_folder:
+    required: true
+  mock_deploy:
+    required: false
+    default: 'false'
+  run_number:
+    required: true
+  run_attempt:
+    required: true
+
+outputs:
+  version:
+    description: 'Solution version from Solution.xml'
+    value: ${{ steps.stamp-version.outputs.version }}
+  artifact_name:
+    description: 'GitHub Actions artifact name'
+    value: ${{ steps.set-names.outputs.artifact_name }}
+  unmanaged_zip:
+    description: 'Relative path to unmanaged ZIP'
+    value: ${{ steps.set-names.outputs.unmanaged_zip }}
+  managed_zip:
+    description: 'Relative path to managed ZIP'
+    value: ${{ steps.set-names.outputs.managed_zip }}
+  checker_artifact_name:
+    description: 'GitHub Actions artifact name for Solution Checker report'
+    value: ${{ steps.set-names.outputs.checker_artifact_name }}
+  out_dir:
+    description: 'Output directory for this solution'
+    value: ${{ steps.set-names.outputs.out_dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read solution version
+      id: stamp-version
+      shell: pwsh
+      run: |
+        & .ci/templates/steps/dynamics/Set-SolutionVersion.ps1 `
+          -SolutionXmlPath '${{ inputs.solution_source_folder }}/Other/Solution.xml'
+
+    - name: Set artifact and ZIP names
+      id: set-names
+      shell: pwsh
+      run: |
+        $sol     = '${{ inputs.solution_name }}'
+        $ver     = '${{ steps.stamp-version.outputs.version }}'
+        $run     = '${{ inputs.run_number }}'
+        $attempt = '${{ inputs.run_attempt }}'
+        $outDir  = "out/$sol"
+
+        $unman   = "$outDir/${sol}-${ver}_unmanaged.zip"
+        $man     = "$outDir/${sol}-${ver}_managed.zip"
+
+        $artSuffix   = if ($attempt -eq '1') { "run${run}" } else { "run${run}-a${attempt}" }
+        $artName     = "solution-${sol}-${artSuffix}"
+        $checkerName = "SolutionChecker-${sol}-${artSuffix}"
+
+        New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+        New-Item -ItemType Directory -Path "$outDir/solution-checker" -Force | Out-Null
+        New-Item -ItemType Directory -Path "$outDir/config" -Force | Out-Null
+
+        "artifact_name=$artName"              | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        "unmanaged_zip=$unman"                | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        "managed_zip=$man"                    | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        "out_dir=$outDir"                     | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        "checker_artifact_name=$checkerName"  | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+        Write-Host "Solution version : $ver"
+        Write-Host "Artifact name    : $artName"
+        Write-Host "Unmanaged ZIP    : $unman"
+        Write-Host "Managed ZIP      : $man"
+
+    - name: Strip Managed tag
+      shell: pwsh
+      run: |
+        & .ci/templates/steps/dynamics/Remove-ManagedTag.ps1 `
+          -SolutionXmlPath '${{ inputs.solution_source_folder }}/Other/Solution.xml'
+
+    - name: Pack Unmanaged — Real (PAC CLI)
+      if: ${{ inputs.mock_deploy != 'true' }}
+      uses: microsoft/powerplatform-actions/pack-solution@v1
+      with:
+        solution-folder: ${{ inputs.solution_source_folder }}
+        solution-file:   ${{ steps.set-names.outputs.unmanaged_zip }}
+        solution-type:   Unmanaged
+
+    - name: Pack Unmanaged — Simulation (mock_deploy)
+      if: ${{ inputs.mock_deploy == 'true' }}
+      shell: pwsh
+      run: |
+        & .ci/templates/steps/dynamics/New-MockSolutionZip.ps1 `
+          -SolutionFolder '${{ inputs.solution_source_folder }}' `
+          -OutputZipPath  '${{ steps.set-names.outputs.unmanaged_zip }}' `
+          -PackageType    'Unmanaged'
+
+    - name: Pack Managed — Real (PAC CLI)
+      if: ${{ inputs.mock_deploy != 'true' }}
+      uses: microsoft/powerplatform-actions/pack-solution@v1
+      with:
+        solution-folder: ${{ inputs.solution_source_folder }}
+        solution-file:   ${{ steps.set-names.outputs.managed_zip }}
+        solution-type:   Managed
+
+    - name: Pack Managed — Simulation (mock_deploy)
+      if: ${{ inputs.mock_deploy == 'true' }}
+      shell: pwsh
+      run: |
+        & .ci/templates/steps/dynamics/New-MockSolutionZip.ps1 `
+          -SolutionFolder '${{ inputs.solution_source_folder }}' `
+          -OutputZipPath  '${{ steps.set-names.outputs.managed_zip }}' `
+          -PackageType    'Managed'

@@ -1,0 +1,88 @@
+name: 'Post-Deploy'
+description: 'Publishes customizations, writes the deploy summary, and tags the JFrog artifact as prodDeployed'
+
+inputs:
+  solution_name:
+    description: 'Name of the solution'
+    required: true
+  solution_version:
+    description: 'Deployed solution version string'
+    required: true
+  environment_name:
+    description: 'Environment label (Dev, Intg, UAT, FRS, Perf, Prod)'
+    required: true
+  environment_url:
+    description: 'Target Power Platform environment URL'
+    required: true
+  artifact_name:
+    description: 'Artifact identifier used for JFrog tagging'
+    required: true
+  jfrog_url:
+    description: 'JFrog Artifactory base URL'
+    required: true
+  jfrog_repo:
+    description: 'JFrog repository name'
+    required: true
+  run_number:
+    description: 'GitHub run number'
+    required: true
+  run_attempt:
+    description: 'GitHub run attempt number'
+    required: true
+  tag_prod_deployed:
+    description: 'If true, tag the JFrog artifact with prodDeployed=true (Prod only)'
+    required: false
+    default: 'false'
+  mock_deploy:
+    description: 'If true, skip real publish and summary steps'
+    required: false
+    default: 'false'
+  skip_import:
+    description: 'If true, import was skipped — adjust summary accordingly'
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Publish customizations
+      if: ${{ inputs.mock_deploy != 'true' && inputs.skip_import != 'true' }}
+      uses: microsoft/powerplatform-actions/publish-solution@v1
+      with:
+        environment-url: ${{ inputs.environment_url }}
+        app-id: ${{ env.PP_APP_ID }}
+        client-secret: ${{ env.PP_CLIENT_SECRET }}
+        tenant-id: ${{ env.PP_TENANT_ID }}
+
+    - name: Tag artifact as prodDeployed in JFrog
+      if: ${{ inputs.tag_prod_deployed == 'true' && inputs.mock_deploy != 'true' }}
+      shell: pwsh
+      run: |
+        $scriptPath = ".ci/templates/steps/dynamics/Invoke-JFrogAction.ps1"
+        & $scriptPath `
+          -Action "tag-prod" `
+          -SolutionName "${{ inputs.solution_name }}" `
+          -ArtifactName "${{ inputs.artifact_name }}" `
+          -JFrogUrl "${{ inputs.jfrog_url }}" `
+          -JFrogRepo "${{ inputs.jfrog_repo }}" `
+          -RunNumber "${{ inputs.run_number }}" `
+          -RunAttempt "${{ inputs.run_attempt }}" `
+          -JFrogToken "${{ env.JFROG_TOKEN }}"
+
+    - name: Write deploy summary
+      shell: pwsh
+      run: |
+        $scriptPath = ".ci/templates/steps/dynamics/Write-DeploySummary.ps1"
+        & $scriptPath `
+          -SolutionName "${{ inputs.solution_name }}" `
+          -SolutionVersion "${{ inputs.solution_version }}" `
+          -EnvironmentName "${{ inputs.environment_name }}" `
+          -EnvironmentUrl "${{ inputs.environment_url }}" `
+          -MockDeploy:$${{ inputs.mock_deploy == 'true' }} `
+          -SkipImport:$${{ inputs.skip_import == 'true' }}
+
+    - name: Post-deploy (mock)
+      if: ${{ inputs.mock_deploy == 'true' }}
+      shell: pwsh
+      run: |
+        Write-Host "[MOCK] Post-deploy steps simulated for '${{ inputs.solution_name }}' → ${{ inputs.environment_name }}" -ForegroundColor Cyan

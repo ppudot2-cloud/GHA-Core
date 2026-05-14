@@ -1,0 +1,55 @@
+name: 'Export Config Data'
+description: 'Exports configuration migration data from the source environment'
+
+inputs:
+  solution_name:
+    description: 'Name of the solution'
+    required: true
+  data_schema_file:
+    description: 'Path to the data schema XML file (empty = skip export)'
+    required: false
+    default: ''
+  source_environment_url:
+    description: 'Power Platform environment URL to export data from'
+    required: false
+    default: ''
+  run_number:
+    description: 'GitHub run number'
+    required: true
+  mock_deploy:
+    description: 'If true, simulate data export without connecting to Power Platform'
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Export configuration data (real)
+      if: ${{ inputs.data_schema_file != '' && inputs.mock_deploy != 'true' }}
+      uses: microsoft/powerplatform-actions/export-data@v1
+      with:
+        environment-url: ${{ inputs.source_environment_url }}
+        app-id: ${{ env.PP_APP_ID }}
+        client-secret: ${{ env.PP_CLIENT_SECRET }}
+        tenant-id: ${{ env.PP_TENANT_ID }}
+        schema-file: ${{ inputs.data_schema_file }}
+        data-file: config-data/${{ inputs.solution_name }}-data.zip
+
+    - name: Export configuration data (mock)
+      if: ${{ inputs.data_schema_file != '' && inputs.mock_deploy == 'true' }}
+      shell: pwsh
+      run: |
+        $scriptPath = "${{ github.action_path }}/../../../../templates/steps/dynamics/Export-ConfigDataSim.ps1"
+        if (-not (Test-Path $scriptPath)) {
+          $scriptPath = ".ci/templates/steps/dynamics/Export-ConfigDataSim.ps1"
+        }
+        & $scriptPath `
+          -SolutionName "${{ inputs.solution_name }}" `
+          -DataSchemaFile "${{ inputs.data_schema_file }}" `
+          -RunNumber "${{ inputs.run_number }}"
+
+    - name: Skip config data export
+      if: ${{ inputs.data_schema_file == '' }}
+      shell: pwsh
+      run: |
+        Write-Host "No data schema file specified — skipping config data export." -ForegroundColor Yellow

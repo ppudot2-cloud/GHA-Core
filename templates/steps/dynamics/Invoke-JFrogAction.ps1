@@ -18,8 +18,10 @@
 .PARAMETER JFrogRepo
     Artifactory repository name (e.g. powerplatform-solutions).
 
-.PARAMETER ApiKey
-    JFrog API key (X-JFrog-Art-Api header).
+.PARAMETER JFrogToken
+    JFrog API key / OIDC token (X-JFrog-Art-Api header).
+    Pass $env:JFROG_TOKEN — sourced from the jfrog/setup-jfrog-cli OIDC exchange
+    or from Azure Key Vault when using a static API key.
 
 .PARAMETER SolutionName
     Unique solution name.
@@ -48,7 +50,7 @@ param(
     [Parameter(Mandatory)][ValidateSet('upload','download','tag')][string] $Action,
     [Parameter(Mandatory)][string] $JFrogUrl,
     [Parameter(Mandatory)][string] $JFrogRepo,
-    [Parameter(Mandatory)][string] $ApiKey,
+    [Parameter(Mandatory)][string] $JFrogToken,
     [Parameter(Mandatory)][string] $SolutionName,
     [Parameter(Mandatory)][string] $RepoName,
     [Parameter(Mandatory)][string] $RunNumber,
@@ -65,7 +67,7 @@ $remotePath = "$JFrogRepo/$RepoName/$SolutionName/$RunNumber/$RunAttempt"
 $baseUrl    = "$JFrogUrl/$remotePath"
 
 $headers = @{
-    'X-JFrog-Art-Api' = $ApiKey
+    'X-JFrog-Art-Api' = $JFrogToken
 }
 
 switch ($Action) {

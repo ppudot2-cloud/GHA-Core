@@ -1,0 +1,144 @@
+name: 'Import Solution'
+description: 'Imports a managed solution into a Power Platform environment (with optional holding-pattern upgrade)'
+
+inputs:
+  solution_name:
+    description: 'Name of the solution'
+    required: true
+  managed_zip:
+    description: 'Path to the managed solution zip file'
+    required: true
+  environment_url:
+    description: 'Target Power Platform environment URL'
+    required: true
+  environment_name:
+    description: 'Environment label (Dev, Intg, UAT, FRS, Perf, Prod)'
+    required: true
+  solution_type:
+    description: 'Import type: Managed or Unmanaged'
+    required: false
+    default: 'Managed'
+  trigger_upgrade:
+    description: 'Use stage-and-upgrade pattern (import as holding, then apply upgrade)'
+    required: false
+    default: 'false'
+  settings_file_resolved:
+    description: 'Path to the token-substituted deployment-settings JSON (empty = no settings file)'
+    required: false
+    default: ''
+  import_config_data:
+    description: 'Import configuration migration data after solution import'
+    required: false
+    default: 'false'
+  data_file:
+    description: 'Path to the config data zip (required if import_config_data=true)'
+    required: false
+    default: ''
+  mock_deploy:
+    description: 'If true, simulate import without connecting to Power Platform'
+    required: false
+    default: 'false'
+  skip_import:
+    description: 'If true, skip the import (set by pre-deploy-checks version compare)'
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    # ── Standard import ─────────────────────────────────────────────────────────
+    - name: Import solution (standard, no settings file)
+      if: ${{ inputs.mock_deploy != 'true' && inputs.skip_import != 'true' && inputs.trigger_upgrade != 'true' && inputs.settings_file_resolved == '' }}
+      uses: microsoft/powerplatform-actions/import-solution@v1
+      with:
+        environment-url: ${{ inputs.environment_url }}
+        app-id: ${{ env.PP_APP_ID }}
+        client-secret: ${{ env.PP_CLIENT_SECRET }}
+        tenant-id: ${{ env.PP_TENANT_ID }}
+        solution-file: ${{ inputs.managed_zip }}
+        force-overwrite: true
+        publish-changes: true
+        skip-dependency-check: false
+
+    - name: Import solution (standard, with settings file)
+      if: ${{ inputs.mock_deploy != 'true' && inputs.skip_import != 'true' && inputs.trigger_upgrade != 'true' && inputs.settings_file_resolved != '' }}
+      uses: microsoft/powerplatform-actions/import-solution@v1
+      with:
+        environment-url: ${{ inputs.environment_url }}
+        app-id: ${{ env.PP_APP_ID }}
+        client-secret: ${{ env.PP_CLIENT_SECRET }}
+        tenant-id: ${{ env.PP_TENANT_ID }}
+        solution-file: ${{ inputs.managed_zip }}
+        deployment-settings-file: ${{ inputs.settings_file_resolved }}
+        force-overwrite: true
+        publish-changes: true
+        skip-dependency-check: false
+
+    # ── Holding-pattern (stage-and-upgrade) ─────────────────────────────────────
+    - name: Import holding solution (stage-and-upgrade, no settings file)
+      if: ${{ inputs.mock_deploy != 'true' && inputs.skip_import != 'true' && inputs.trigger_upgrade == 'true' && inputs.settings_file_resolved == '' }}
+      uses: microsoft/powerplatform-actions/import-solution@v1
+      with:
+        environment-url: ${{ inputs.environment_url }}
+        app-id: ${{ env.PP_APP_ID }}
+        client-secret: ${{ env.PP_CLIENT_SECRET }}
+        tenant-id: ${{ env.PP_TENANT_ID }}
+        solution-file: ${{ inputs.managed_zip }}
+        import-as-holding: true
+        force-overwrite: true
+        publish-changes: false
+        skip-dependency-check: false
+
+    - name: Import holding solution (stage-and-upgrade, with settings file)
+      if: ${{ inputs.mock_deploy != 'true' && inputs.skip_import != 'true' && inputs.trigger_upgrade == 'true' && inputs.settings_file_resolved != '' }}
+      uses: microsoft/powerplatform-actions/import-solution@v1
+      with:
+        environment-url: ${{ inputs.environment_url }}
+        app-id: ${{ env.PP_APP_ID }}
+        client-secret: ${{ env.PP_CLIENT_SECRET }}
+        tenant-id: ${{ env.PP_TENANT_ID }}
+        solution-file: ${{ inputs.managed_zip }}
+        deployment-settings-file: ${{ inputs.settings_file_resolved }}
+        import-as-holding: true
+        force-overwrite: true
+        publish-changes: false
+        skip-dependency-check: false
+
+    - name: Apply solution upgrade
+      if: ${{ inputs.mock_deploy != 'true' && inputs.skip_import != 'true' && inputs.trigger_upgrade == 'true' }}
+      uses: microsoft/powerplatform-actions/upgrade-solution@v1
+      with:
+        environment-url: ${{ inputs.environment_url }}
+        app-id: ${{ env.PP_APP_ID }}
+        client-secret: ${{ env.PP_CLIENT_SECRET }}
+        tenant-id: ${{ env.PP_TENANT_ID }}
+        solution-name: ${{ inputs.solution_name }}
+        async: true
+
+    # ── Config data import ───────────────────────────────────────────────────────
+    - name: Import configuration data
+      if: ${{ inputs.mock_deploy != 'true' && inputs.skip_import != 'true' && inputs.import_config_data == 'true' && inputs.data_file != '' }}
+      uses: microsoft/powerplatform-actions/import-data@v1
+      with:
+        environment-url: ${{ inputs.environment_url }}
+        app-id: ${{ env.PP_APP_ID }}
+        client-secret: ${{ env.PP_CLIENT_SECRET }}
+        tenant-id: ${{ env.PP_TENANT_ID }}
+        data-file: ${{ inputs.data_file }}
+
+    # ── Mock ────────────────────────────────────────────────────────────────────
+    - name: Import solution (mock)
+      if: ${{ inputs.mock_deploy == 'true' }}
+      shell: pwsh
+      run: |
+        Write-Host "[MOCK] Simulating import of '${{ inputs.solution_name }}' to ${{ inputs.environment_name }}" -ForegroundColor Cyan
+        Write-Host "  trigger_upgrade : ${{ inputs.trigger_upgrade }}"
+        Write-Host "  settings_file   : ${{ inputs.settings_file_resolved }}"
+        Write-Host "  import_config_data: ${{ inputs.import_config_data }}"
+
+    # ── Version already installed ────────────────────────────────────────────────
+    - name: Skip import (version already current)
+      if: ${{ inputs.skip_import == 'true' }}
+      shell: pwsh
+      run: |
+        Write-Host "Version compare determined no import needed — solution already up to date." -ForegroundColor Yellow
