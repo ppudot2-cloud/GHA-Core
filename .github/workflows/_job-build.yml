@@ -204,7 +204,7 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          .ci/templates/steps/dynamics/Write-BuildSummary.ps1 `
+          & .ci/templates/steps/dynamics/Write-BuildSummary.ps1 `
             -SolutionName    "${{ inputs.solution_name }}" `
             -SolutionVersion "${{ steps.pack.outputs.version }}" `
             -ArtifactName    "${{ steps.pack.outputs.artifact_name }}" `

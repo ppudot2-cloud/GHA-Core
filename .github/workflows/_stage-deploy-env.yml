@@ -127,7 +127,7 @@ jobs:
         solution: ${{ fromJson(inputs.matrix) }}
       max-parallel: 1
       fail-fast: true
-    uses: ppudot2-cloud/GHA-Core/.github/workflows/dynamics/jobs/_job-deploy.yml@main
+    uses: ppudot2-cloud/GHA-Core/.github/workflows/_job-deploy.yml@main
     with:
       environment_name:         ${{ inputs.environment_name }}
       environment_url:          ${{ inputs.environment_url }}

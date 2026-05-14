@@ -127,7 +127,7 @@ jobs:
             exit 1
           }
 
-          $apiKey = '${{ secrets.JFROG_API_KEY }}'
+          $apiKey = '${{ secrets.JFROG_API_KEY }}'   # validate secret is set
           if (-not $apiKey -and -not $mock) {
             Write-Error "::error::JFROG_API_KEY secret is not set. Required for non-mock JFrog operations."
             exit 1
@@ -177,7 +177,7 @@ jobs:
       - name: "JFrog ${{ inputs.action }}"
         shell: pwsh
         env:
-          JFROG_API_KEY: ${{ secrets.JFROG_API_KEY }}
+          JFROG_TOKEN: ${{ secrets.JFROG_API_KEY }}   # env var name must match what PS1 reads ($env:JFROG_TOKEN)
         run: |
           $repoName   = '${{ github.event.repository.name }}'
           $runNum     = if ('${{ inputs.build_run_number }}') { '${{ inputs.build_run_number }}' } else { '${{ github.run_number }}' }
