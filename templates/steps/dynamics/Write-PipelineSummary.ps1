@@ -44,6 +44,9 @@ param(
     [string] $DeployPerfResult  = 'skipped',
     [string] $GateProdResult    = 'skipped',
     [string] $DeployProdResult  = 'skipped',
+    # Convenience aggregate params used by callers that don't track per-env stages.
+    [string] $ExportResult      = 'skipped',
+    [string] $DeployResult      = 'skipped',
     # Directory containing job-summary JSON records emitted by build/deploy jobs.
     # Pass the path where all job-summary-* artifacts were downloaded.
     # Leave blank to skip the per-job detail section.
@@ -81,7 +84,9 @@ function Get-StepIcon([string]$outcome) {
 | Stage | Environment | Result |
 | --- | --- | --- |
 | 🔍 Resolve | — | $(Get-Icon $SetupResult) |
+| 📤 Export | — | $(Get-Icon $ExportResult) |
 | 🏗️ Build (×$SolutionCount) | — | $(Get-Icon $BuildResult) |
+| 🚀 Deploy (all envs) | — | $(Get-Icon $DeployResult) |
 | 🔐 Gate | Dev | $(Get-Icon $GateDevResult) |
 | 🚀 Deploy | Dev | $(Get-Icon $DeployDevResult) |
 | 🔐 Gate | Intg | $(Get-Icon $GateIntgResult) |

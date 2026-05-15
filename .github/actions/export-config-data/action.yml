@@ -44,9 +44,9 @@ runs:
           $scriptPath = ".ci/templates/steps/dynamics/Export-ConfigDataSim.ps1"
         }
         & $scriptPath `
-          -SolutionName "${{ inputs.solution_name }}" `
-          -DataSchemaFile "${{ inputs.data_schema_file }}" `
-          -RunNumber "${{ inputs.run_number }}"
+          -SchemaFile    "${{ inputs.data_schema_file }}" `
+          -OutputZipPath "config-data/${{ inputs.solution_name }}-data.zip" `
+          -RunNumber     "${{ inputs.run_number }}"
 
     - name: Skip config data export
       if: ${{ inputs.data_schema_file == '' }}

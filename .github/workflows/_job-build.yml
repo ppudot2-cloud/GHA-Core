@@ -129,7 +129,7 @@ jobs:
         shell: bash
         run: |
           if [ "${{ inputs.use_exported_source }}" = "true" ]; then
-            echo "folder=export-src" >> "$GITHUB_OUTPUT"
+            echo "folder=export-src/${{ inputs.solution_name }}" >> "$GITHUB_OUTPUT"
           else
             echo "folder=${{ inputs.solution_source_folder }}" >> "$GITHUB_OUTPUT"
           fi
@@ -208,5 +208,5 @@ jobs:
             -SolutionName    "${{ inputs.solution_name }}" `
             -SolutionVersion "${{ steps.pack.outputs.version }}" `
             -ArtifactName    "${{ steps.pack.outputs.artifact_name }}" `
-            -SourceMode      "${{ inputs.use_exported_source == true && 'exported' || 'source-tree' }}" `
+            -RunNumber       "${{ github.run_number }}" `
             -MockDeploy:$${{ inputs.mock_deploy == true }}

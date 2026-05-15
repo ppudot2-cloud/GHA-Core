@@ -41,16 +41,15 @@ runs:
       shell: pwsh
       run: |
         $scriptPath = ".ci/templates/steps/dynamics/Invoke-JFrogAction.ps1"
+        $localPath = Split-Path "${{ inputs.managed_zip }}" -Parent
         & $scriptPath `
-          -Action "upload" `
+          -Action       "upload" `
           -SolutionName "${{ inputs.solution_name }}" `
-          -ArtifactName "${{ inputs.artifact_name }}" `
-          -UnmanagedZip "${{ inputs.unmanaged_zip }}" `
-          -ManagedZip "${{ inputs.managed_zip }}" `
-          -CheckerArtifactName "${{ inputs.checker_artifact_name }}" `
-          -JFrogUrl "${{ inputs.jfrog_url }}" `
-          -JFrogRepo "${{ inputs.jfrog_repo }}" `
-          -RunNumber "${{ inputs.run_number }}" `
-          -RunAttempt "${{ inputs.run_attempt }}" `
+          -RepoName     "${{ github.repository }}" `
+          -LocalPath    $localPath `
+          -JFrogUrl     "${{ inputs.jfrog_url }}" `
+          -JFrogRepo    "${{ inputs.jfrog_repo }}" `
+          -RunNumber    "${{ inputs.run_number }}" `
+          -RunAttempt   "${{ inputs.run_attempt }}" `
           -MockDeploy:$${{ inputs.mock_deploy == 'true' }} `
-          -JFrogToken "${{ env.JFROG_TOKEN }}"
+          -JFrogToken   "${{ env.JFROG_TOKEN }}"

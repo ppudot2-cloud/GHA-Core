@@ -99,22 +99,30 @@ if ($input.ToLower() -eq 'all') {
 # dependsOn in solutions.json is documentation metadata only — not used here.
 # Solutions without a deployOrder field sort after those that have one.
 
-$selected = $registry |
+$selectedEntries = $registry |
     Where-Object { $_.name -in $selectedNames } |
     Sort-Object { if ($null -ne $_.deployOrder) { [int]$_.deployOrder } else { [int]::MaxValue } } |
-    ForEach-Object { $_.name }
+    ForEach-Object {
+        [PSCustomObject]@{
+            name                       = $_.name
+            source_folder              = if ($_.folder) { $_.folder } else { "src/solutions/$($_.name)" }
+            checker_geo                = if ($_.checkerGeo) { $_.checkerGeo } else { 'UnitedStates' }
+            data_schema_file           = if ($_.dataSchemaFile) { $_.dataSchemaFile } else { '' }
+            deployment_settings_prefix = 'deployment-settings'
+        }
+    }
 
 Write-Host "ℹ️  Ordered by deployOrder:"
-for ($i = 0; $i -lt $selected.Count; $i++) {
-    $entry = $registry | Where-Object { $_.name -eq $selected[$i] }
+for ($i = 0; $i -lt $selectedEntries.Count; $i++) {
+    $entry = $registry | Where-Object { $_.name -eq $selectedEntries[$i].name }
     $order = if ($null -ne $entry.deployOrder) { $entry.deployOrder } else { '(none)' }
-    Write-Host "   $($i+1). $($selected[$i])  [deployOrder=$order]"
+    Write-Host "   $($i+1). $($selectedEntries[$i].name)  [deployOrder=$order]"
 }
 
 # ── 4. Write outputs ──────────────────────────────────────────────────────────
-$matrix       = ConvertTo-Json @{ solution = $selected } -Compress
-$solutionList = $selected -join ', '
-$count        = $selected.Count
+$matrix       = ConvertTo-Json @{ solution = @($selectedEntries) } -Compress
+$solutionList = ($selectedEntries | ForEach-Object { $_.name }) -join ', '
+$count        = $selectedEntries.Count
 
 "matrix=$matrix"              | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 "solution_list=$solutionList" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
@@ -122,8 +130,8 @@ $count        = $selected.Count
 
 Write-Host ""
 Write-Host "✅ $count solution(s) resolved in deploy order:"
-for ($i = 0; $i -lt $selected.Count; $i++) {
-    Write-Host "   $($i+1). $($selected[$i])"
+for ($i = 0; $i -lt $selectedEntries.Count; $i++) {
+    Write-Host "   $($i+1). $($selectedEntries[$i].name)"
 }
 
 # ── 5. Step summary ───────────────────────────────────────────────────────────
@@ -134,9 +142,9 @@ for ($i = 0; $i -lt $selected.Count; $i++) {
 | --- | --- | --- |
 "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
-for ($i = 0; $i -lt $selected.Count; $i++) {
-    $entry = $registry | Where-Object { $_.name -eq $selected[$i] }
+for ($i = 0; $i -lt $selectedEntries.Count; $i++) {
+    $entry = $registry | Where-Object { $_.name -eq $selectedEntries[$i].name }
     $order = if ($null -ne $entry.deployOrder) { $entry.deployOrder } else { 'n/a' }
-    "| $($i+1) | ``$($selected[$i])`` | $order |" |
+    "| $($i+1) | ``$($selectedEntries[$i].name)`` | $order |" |
         Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 }

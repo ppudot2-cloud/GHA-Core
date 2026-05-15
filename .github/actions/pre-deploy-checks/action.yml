@@ -58,11 +58,11 @@ runs:
       run: |
         $scriptPath = ".ci/templates/steps/dynamics/Invoke-BlockingCheck.ps1"
         & $scriptPath `
-          -SolutionName "${{ inputs.solution_name }}" `
-          -EnvironmentUrl "${{ inputs.environment_url }}" `
-          -AppId "${{ env.PP_APP_ID }}" `
-          -ClientSecret "${{ env.PP_CLIENT_SECRET }}" `
-          -TenantId "${{ env.PP_TENANT_ID }}"
+          -EnvironmentUrl  "${{ inputs.environment_url }}" `
+          -EnvironmentName "${{ inputs.solution_name }}" `
+          -AppId           "${{ env.PP_APP_ID }}" `
+          -ClientSecret    "${{ env.PP_CLIENT_SECRET }}" `
+          -TenantId        "${{ env.PP_TENANT_ID }}"
 
     - name: Compare solution version
       id: version-compare
@@ -71,12 +71,12 @@ runs:
       run: |
         $scriptPath = ".ci/templates/steps/dynamics/Compare-SolutionVersion.ps1"
         $result = & $scriptPath `
-          -SolutionName "${{ inputs.solution_name }}" `
-          -ArtifactName "${{ inputs.artifact_name }}" `
-          -EnvironmentUrl "${{ inputs.environment_url }}" `
-          -AppId "${{ env.PP_APP_ID }}" `
-          -ClientSecret "${{ env.PP_CLIENT_SECRET }}" `
-          -TenantId "${{ env.PP_TENANT_ID }}"
+          -SolutionName           "${{ inputs.solution_name }}" `
+          -ArtifactFolder         "out/${{ inputs.solution_name }}" `
+          -PreviousEnvironmentUrl "${{ inputs.environment_url }}" `
+          -AppId                  "${{ env.PP_APP_ID }}" `
+          -ClientSecret           "${{ env.PP_CLIENT_SECRET }}" `
+          -TenantId               "${{ env.PP_TENANT_ID }}"
         echo "skip_import=$result" >> $env:GITHUB_OUTPUT
 
     - name: Pre-deploy checks (mock)

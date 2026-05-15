@@ -140,6 +140,7 @@ runs:
         JFROG_REPO:                ${{ inputs.jfrog_repo }}
         RUN_NUMBER:                ${{ inputs.run_number }}
         RUN_ATTEMPT:               ${{ inputs.run_attempt }}
+        PREVIOUS_ENV_URL:          ${{ inputs.previous_environment_url }}
       run: |
         Set-StrictMode -Version Latest
         $ErrorActionPreference = 'Stop'
@@ -163,8 +164,8 @@ runs:
           $prefix       = if ($sol.deployment_settings_prefix) { $sol.deployment_settings_prefix } else { 'deployment-settings' }
           $artifactName = "${name}_$($env:RUN_NUMBER)_$($env:RUN_ATTEMPT)"
           $settingsFile = "$prefix/$envLower/$name.json"
-          $outDir       = "out/$artifactName"
-          $managedZip   = "$outDir/${name}_managed.zip"
+          $outDir       = "out/$name"
+          $managedZip   = (Get-ChildItem -Path $outDir -Filter "*_managed.zip" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName)
           $settingsResolved = "$outDir/deployment-settings-resolved.json"
           $dataZip      = "config-data/$name-data.zip"
           $backupDir    = "backup"
@@ -181,6 +182,7 @@ runs:
             if ($isMock) {
               Write-Host "  [MOCK] Skipping artifact check" -ForegroundColor Cyan
               New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+              $managedZip = "$outDir/${name}_mock_managed.zip"
               New-Item -ItemType File     -Force -Path $managedZip | Out-Null  # placeholder
             } else {
               if (-not (Test-Path $managedZip)) {
@@ -234,8 +236,8 @@ runs:
             Write-Host "[$name] Step 4/11 — Blocking check"
             if ($env:ENABLE_BLOCKING_CHECK -eq 'true' -and -not $isMock) {
               & "$scriptsDir/Invoke-BlockingCheck.ps1" `
-                -SolutionName  $name `
-                -EnvironmentUrl $envUrl `
+                -EnvironmentUrl  $envUrl `
+                -EnvironmentName $name `
                 -AppId         $env:PP_APP_ID `
                 -ClientSecret  $env:PP_CLIENT_SECRET `
                 -TenantId      $env:PP_TENANT_ID
@@ -249,12 +251,13 @@ runs:
             Write-Host "[$name] Step 5/11 — Version compare"
             if ($env:ENABLE_VERSION_COMPARE -eq 'true' -and -not $isMock) {
               $result = & "$scriptsDir/Compare-SolutionVersion.ps1" `
-                -SolutionName  $name `
-                -ArtifactName  $artifactName `
-                -EnvironmentUrl $envUrl `
-                -AppId         $env:PP_APP_ID `
-                -ClientSecret  $env:PP_CLIENT_SECRET `
-                -TenantId      $env:PP_TENANT_ID
+                -SolutionName           $name `
+                -ArtifactFolder         $outDir `
+                -PreviousEnvironmentUrl $env:PREVIOUS_ENV_URL `
+                -TargetEnvironmentUrl   $envUrl `
+                -AppId                  $env:PP_APP_ID `
+                -ClientSecret           $env:PP_CLIENT_SECRET `
+                -TenantId               $env:PP_TENANT_ID
               $skipImport = ($result -eq 'true')
               if ($skipImport) {
                 Write-Host "  ⏭ Version already current — import will be skipped" -ForegroundColor Yellow
@@ -354,24 +357,24 @@ runs:
             if ($env:TAG_PROD_DEPLOYED -eq 'true' -and -not $isMock -and $env:JFROG_URL -ne '') {
               Write-Host "  Tagging $artifactName as prodDeployed in JFrog..."
               & "$scriptsDir/Invoke-JFrogAction.ps1" `
-                -Action     "tag-prod" `
-                -SolutionName $name `
-                -ArtifactName $artifactName `
-                -JFrogUrl   $env:JFROG_URL `
-                -JFrogRepo  $env:JFROG_REPO `
-                -RunNumber  $env:RUN_NUMBER `
-                -RunAttempt $env:RUN_ATTEMPT `
-                -JFrogToken $env:JFROG_TOKEN
+                -Action          "tag" `
+                -SolutionName    $name `
+                -RepoName        $env:GITHUB_REPOSITORY `
+                -JFrogUrl        $env:JFROG_URL `
+                -JFrogRepo       $env:JFROG_REPO `
+                -RunNumber       $env:RUN_NUMBER `
+                -RunAttempt      $env:RUN_ATTEMPT `
+                -JFrogToken      $env:JFROG_TOKEN `
+                -TagProperties   "prodDeployed=true"
             }
             # ── 11. Deploy summary ─────────────────────────────────────────────
             Write-Host "[$name] Step 11/11 — Deploy summary"
             & "$scriptsDir/Write-DeploySummary.ps1" `
               -SolutionName    $name `
-              -SolutionVersion $artifactName `
               -EnvironmentName $envName `
               -EnvironmentUrl  $envUrl `
-              -MockDeploy:$isMock `
-              -SkipImport:$skipImport
+              -RunNumber       $env:RUN_NUMBER `
+              -MockDeploy:$isMock
 
             Write-Host "  ✅ $name deployed successfully → $envName"
 

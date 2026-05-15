@@ -56,7 +56,7 @@ runs:
           'pp-client-secret' = 'PP_CLIENT_SECRET'
           'pp-tenant-id'     = 'PP_TENANT_ID'
         }
-        if ($jfrogEnabled) { $secrets['jfrog-api-key'] = 'JFROG_API_KEY' }
+        if ($jfrogEnabled) { $secrets['jfrog-api-key'] = 'JFROG_TOKEN' }
         foreach ($entry in $secrets.GetEnumerator()) {
           $value = az keyvault secret show `
             --vault-name $kvName --name $entry.Key --query value -o tsv 2>&1
