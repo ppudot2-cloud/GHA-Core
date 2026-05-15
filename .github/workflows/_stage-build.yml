@@ -65,8 +65,7 @@ jobs:
   build:
     name: Build — ${{ matrix.solution.name }}
     strategy:
-      matrix:
-        solution: ${{ fromJson(inputs.matrix) }}
+      matrix: ${{ fromJson(inputs.matrix) }}
       fail-fast: false
     # Job-level `uses:` + `strategy.matrix` — GitHub Actions valid pattern.
     # A job with `uses:` cannot have `steps:` or `runs-on:`.
