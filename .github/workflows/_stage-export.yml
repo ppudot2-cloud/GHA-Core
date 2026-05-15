@@ -38,8 +38,7 @@ jobs:
     name: "📤 Export | ${{ matrix.solution.name }}"
     runs-on: ubuntu-latest
     strategy:
-      matrix:
-        solution: ${{ fromJson(inputs.matrix) }}
+      matrix: ${{ fromJson(inputs.matrix) }}
       fail-fast: false   # export failures are isolated per solution
 
     env:
