@@ -1,7 +1,10 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # _stage-deploy-chain.yml  —  Reusable DEPLOY CHAIN stage
 #
-# Drives sequential promotion:  Dev → Intg → UAT → FRS → Perf → Prod
+# Drives PARALLEL promotion — all environments start simultaneously.
+# Each job has its own  environment: <name>  so GitHub renders a distinct
+# "Waiting for review" gate per environment.  Approvals can be granted in any
+# order or all at once.  Deployments run as soon as their gate is approved.
 #
 # WHY EXPLICIT JOBS (not strategy.matrix):
 #   strategy.matrix collapses all environments into a single job node in the
@@ -15,18 +18,18 @@
 #   Once configured, GitHub pauses each job and shows an approval prompt
 #   before the runner starts. No extra gate jobs needed.
 #
-# FAIL-FAST:
-#   Each job lists ALL predecessors in needs: and checks
-#     !contains(needs.*.result, 'failure')
-#   so the chain halts on any environment failure, while a job legitimately
-#   skipped by the environments filter is transparent to downstream jobs.
+# PARALLELISM:
+#   No inter-environment needs: — all gates open simultaneously.
+#   Approve all at once or selectively; each environment deploys independently.
+#   Different Dataverse tenants can receive imports concurrently.
+#   (max-parallel:1 still applies WITHIN each environment for multi-solution runs.)
 #
 # ENVIRONMENT FILTER:
-#   Pass  environments: 'Dev,Intg'  to deploy only those two in order.
+#   Pass  environments: 'Dev,Intg'  to deploy only those two in parallel.
 #   Empty string (default) deploys all 6.
 #   Examples:
-#     'Dev,Intg,UAT,FRS,Perf'  → Pipeline 1 (pre-prod)
-#     'UAT,Prod'                → Pipeline 2 (UAT re-validation + Prod)
+#     'Dev,Intg,UAT,FRS,Perf'  → Pipeline 1 (pre-prod, parallel)
+#     'UAT,Prod'                → Pipeline 2 (UAT re-validation + Prod, parallel)
 #
 # INPUT STRUCTURE — two layers:
 #   Common inputs:  matrix, mock_deploy, trigger_upgrade, base_solutions,
@@ -191,18 +194,13 @@ jobs:
           run_attempt:              ${{ inputs.run_attempt }}
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Intg  (needs Dev — halts if Dev failed)
+# Intg  (parallel — no dependency on Dev)
 # ═════════════════════════════════════════════════════════════════════════════
   deploy-intg:
     name: "🚀 Deploy | Intg"
     runs-on: ubuntu-latest
-    needs: deploy-dev
     environment: Intg
-    if: >-
-      always() &&
-      !contains(needs.*.result, 'failure') &&
-      !contains(needs.*.result, 'cancelled') &&
-      (inputs.environments == '' || contains(inputs.environments, 'Intg'))
+    if: inputs.environments == '' || contains(inputs.environments, 'Intg')
     env:
       GHA_CORE_PAT: ${{ secrets.GHA_CORE_PAT }}
 
@@ -251,18 +249,13 @@ jobs:
           run_attempt:              ${{ inputs.run_attempt }}
 
 # ═════════════════════════════════════════════════════════════════════════════
-# UAT  (needs Dev + Intg — halts if either failed)
+# UAT  (parallel — no dependency on Dev or Intg)
 # ═════════════════════════════════════════════════════════════════════════════
   deploy-uat:
     name: "🚀 Deploy | UAT"
     runs-on: ubuntu-latest
-    needs: [deploy-dev, deploy-intg]
     environment: UAT
-    if: >-
-      always() &&
-      !contains(needs.*.result, 'failure') &&
-      !contains(needs.*.result, 'cancelled') &&
-      (inputs.environments == '' || contains(inputs.environments, 'UAT'))
+    if: inputs.environments == '' || contains(inputs.environments, 'UAT')
     env:
       GHA_CORE_PAT: ${{ secrets.GHA_CORE_PAT }}
 
@@ -311,18 +304,13 @@ jobs:
           run_attempt:              ${{ inputs.run_attempt }}
 
 # ═════════════════════════════════════════════════════════════════════════════
-# FRS  (needs Dev + Intg + UAT — halts if any failed)
+# FRS  (parallel — no dependency on Dev, Intg, or UAT)
 # ═════════════════════════════════════════════════════════════════════════════
   deploy-frs:
     name: "🚀 Deploy | FRS"
     runs-on: ubuntu-latest
-    needs: [deploy-dev, deploy-intg, deploy-uat]
     environment: FRS
-    if: >-
-      always() &&
-      !contains(needs.*.result, 'failure') &&
-      !contains(needs.*.result, 'cancelled') &&
-      (inputs.environments == '' || contains(inputs.environments, 'FRS'))
+    if: inputs.environments == '' || contains(inputs.environments, 'FRS')
     env:
       GHA_CORE_PAT: ${{ secrets.GHA_CORE_PAT }}
 
@@ -371,18 +359,13 @@ jobs:
           run_attempt:              ${{ inputs.run_attempt }}
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Perf  (needs Dev + Intg + UAT + FRS — halts if any failed)
+# Perf  (parallel — no dependency on Dev, Intg, UAT, or FRS)
 # ═════════════════════════════════════════════════════════════════════════════
   deploy-perf:
     name: "🚀 Deploy | Perf"
     runs-on: ubuntu-latest
-    needs: [deploy-dev, deploy-intg, deploy-uat, deploy-frs]
     environment: Perf
-    if: >-
-      always() &&
-      !contains(needs.*.result, 'failure') &&
-      !contains(needs.*.result, 'cancelled') &&
-      (inputs.environments == '' || contains(inputs.environments, 'Perf'))
+    if: inputs.environments == '' || contains(inputs.environments, 'Perf')
     env:
       GHA_CORE_PAT: ${{ secrets.GHA_CORE_PAT }}
 
@@ -431,19 +414,14 @@ jobs:
           run_attempt:              ${{ inputs.run_attempt }}
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Prod  (needs all 5 — halts if any failed)
+# Prod  (parallel — own gate, own approval)
 #        tag_prod_deployed: true  → JFrog artifact tagged after success
 # ═════════════════════════════════════════════════════════════════════════════
   deploy-prod:
     name: "🚀 Deploy | Prod"
     runs-on: ubuntu-latest
-    needs: [deploy-dev, deploy-intg, deploy-uat, deploy-frs, deploy-perf]
     environment: Prod
-    if: >-
-      always() &&
-      !contains(needs.*.result, 'failure') &&
-      !contains(needs.*.result, 'cancelled') &&
-      (inputs.environments == '' || contains(inputs.environments, 'Prod'))
+    if: inputs.environments == '' || contains(inputs.environments, 'Prod')
     env:
       GHA_CORE_PAT: ${{ secrets.GHA_CORE_PAT }}
 
