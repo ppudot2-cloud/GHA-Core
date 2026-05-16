@@ -153,6 +153,28 @@ jobs:
             }
           }
 
+          # Write a per-run export marker inside every solution folder.
+          # This guarantees the feature branch always has at least one commit ahead of
+          # main — even in mock mode where the solution source is unchanged — so that
+          # gh pr create never fails with "nothing to merge".
+          foreach ($sol in $solutions) {
+            $markerDir = "src/solutions/$sol"
+            if (Test-Path $markerDir) {
+              $exportMode = if ($isMock) { 'mock (source unchanged, simulated export)' } else { 'real (exported from sandbox)' }
+              $marker = [ordered]@{
+                pipelineRunId      = $runId
+                pipelineRunNumber  = [int]$runNumber
+                pipelineRunAttempt = [int]$runAttempt
+                exportMode         = $exportMode
+                exportedAt         = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ')
+                exportedBy         = '${{ github.actor }}'
+                sandboxUrl         = '${{ inputs.source_environment_url }}'
+              }
+              $marker | ConvertTo-Json | Set-Content "$markerDir/.pipeline-export.json" -Encoding UTF8
+              Write-Host "  ✓ Written export marker → $markerDir/.pipeline-export.json"
+            }
+          }
+
           # pipeline-context.json — read by Pipeline 2 to locate Phase 1 artifacts
           $ctx = [ordered]@{
             runId         = $runId
