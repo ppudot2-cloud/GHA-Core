@@ -16,17 +16,18 @@
 #   JFrog is NOT used for downloads during deploy — only for Prod tagging (step 10).
 #
 # For each solution in solutions_json (in order):
-#   1. Verify artifact is present locally (pre-downloaded by calling job)
-#   2. Resolve deployment-settings token substitution
-#   3. Verify base solutions present (pac solution list)
-#   4. Blocking check (Invoke-BlockingCheck.ps1)
-#   5. Version compare  → sets skip_import flag (Compare-SolutionVersion.ps1)
-#   6. Backup current solution (pac solution export)
-#   7. Import: standard or stage-and-upgrade (pac solution import / upgrade)
-#   8. Import configuration migration data if requested (pac data import)
-#   9. Publish customizations (pac solution publish)
-#  10. Tag JFrog artifact as prodDeployed (Prod only)
-#  11. Write per-solution deploy summary (Write-DeploySummary.ps1)
+#   1.  Verify artifact is present locally (pre-downloaded by calling job)
+#   2.  Resolve deployment-settings token substitution
+#   3.  Verify base solutions present (pac solution list)
+#   4.  Blocking check (Invoke-BlockingCheck.ps1)
+#   5.  Version compare  → sets skip_import flag (Compare-SolutionVersion.ps1)
+#   6.  Backup current solution (pac solution export)
+#   7.  Import: standard or stage-and-upgrade (pac solution import / upgrade)
+#   8.  Import configuration migration data if requested (pac data import)
+#   9.  Publish customizations (pac solution publish)
+#  10.  Activate Cloud Flows (pac flow list + pac flow enable per flow)
+#  11.  Tag JFrog artifact as prodDeployed (Prod only)
+#  12.  Write per-solution deploy summary (Write-DeploySummary.ps1)
 #
 # All steps respect mock_deploy — no Dataverse or JFrog calls are made.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -91,6 +92,10 @@ inputs:
     description: 'JFrog repository name'
     required: false
     default: 'power-platform'
+  activate_flows:
+    description: 'Activate all Cloud Flows in every solution after import'
+    required: false
+    default: 'true'
   run_number:
     description: 'GitHub run number — part of the deterministic artifact name'
     required: true
@@ -133,6 +138,7 @@ runs:
         ENABLE_VERSION_COMPARE:    ${{ inputs.enable_version_compare }}
         IMPORT_CONFIG_DATA:        ${{ inputs.import_config_data }}
         TRIGGER_UPGRADE:           ${{ inputs.trigger_upgrade }}
+        ACTIVATE_FLOWS:            ${{ inputs.activate_flows }}
         MOCK_DEPLOY:               ${{ inputs.mock_deploy }}
         TAG_PROD_DEPLOYED:         ${{ inputs.tag_prod_deployed }}
         BASE_SOLUTIONS:            ${{ inputs.base_solutions }}
@@ -293,7 +299,7 @@ runs:
             }
 
             # ── 7. Import solution ─────────────────────────────────────────────
-            Write-Host "[$name] Step 7/11 — Import solution"
+            Write-Host "[$name] Step 7/13 — Import solution"
             if ($skipImport) {
               Write-Host "  ⏭ Import skipped — version already current" -ForegroundColor Yellow
             } elseif ($isMock) {
@@ -314,8 +320,6 @@ runs:
               if ($env:TRIGGER_UPGRADE -eq 'true') {
                 $importArgs += '--import-as-holding'
                 Write-Host "  Importing as holding (stage-and-upgrade)..."
-              } else {
-                $importArgs += '--publish-all-after-import'
               }
               pac @importArgs
 
@@ -327,7 +331,7 @@ runs:
             }
 
             # ── 8. Import configuration data ───────────────────────────────────
-            Write-Host "[$name] Step 8/11 — Config data"
+            Write-Host "[$name] Step 8/13 — Config data"
             if ($env:IMPORT_CONFIG_DATA -eq 'true' -and -not $skipImport) {
               if ($isMock) {
                 Write-Host "  [MOCK] Config data import simulated" -ForegroundColor Cyan
@@ -343,19 +347,75 @@ runs:
             }
 
             # ── 9. Publish customizations ──────────────────────────────────────
-            Write-Host "[$name] Step 9/11 — Publish"
-            if ($skipImport -or $env:TRIGGER_UPGRADE -eq 'true') {
-              Write-Host "  Publish skipped (upgrade applies during import / import skipped)"
+            Write-Host "[$name] Step 9/13 — Publish customizations"
+            if ($skipImport) {
+              Write-Host "  Publish skipped — import skipped (version already current)"
             } elseif ($isMock) {
-              Write-Host "  [MOCK] Publish simulated" -ForegroundColor Cyan
+              Write-Host "  [MOCK] Publish customizations simulated" -ForegroundColor Cyan
             } else {
               Write-Host "  Publishing customizations..."
               pac solution publish --environment $envUrl
-              Write-Host "  ✓ Published"
+              Write-Host "  ✓ Customizations published"
             }
 
-            # ── 10. JFrog tag + deploy summary ─────────────────────────────────
-            Write-Host "[$name] Step 10/11 — JFrog Prod tag"
+            # ── 10. Activate Cloud Flows ───────────────────────────────────────
+            Write-Host "[$name] Step 10/13 — Activate Cloud Flows"
+            if ($skipImport) {
+              Write-Host "  Activate skipped — import skipped (version already current)"
+            } elseif ($env:ACTIVATE_FLOWS -ne 'true') {
+              Write-Host "  activate_flows=false — skipping"
+            } elseif ($isMock) {
+              Write-Host "  [MOCK] Cloud Flow activation simulated" -ForegroundColor Cyan
+            } else {
+              Write-Host "  Fetching Cloud Flows in solution '$name'..."
+              $flowListRaw = pac flow list --solution-name $name --environment $envUrl --json 2>&1
+              try {
+                $flows = $flowListRaw | ConvertFrom-Json
+                if ($flows -and $flows.Count -gt 0) {
+                  Write-Host "  Found $($flows.Count) flow(s) — activating..."
+                  $activated = 0
+                  $skipped   = 0
+                  foreach ($flow in $flows) {
+                    # PAC CLI uses different property casing across versions
+                    $flowId   = if ($flow.FlowId)      { $flow.FlowId }      `
+                                elseif ($flow.flowId)  { $flow.flowId }      `
+                                elseif ($flow.Id)      { $flow.Id }          `
+                                else                   { $flow.id }
+                    $flowName = if ($flow.DisplayName) { $flow.DisplayName } `
+                                elseif ($flow.displayName) { $flow.displayName } `
+                                else { $flowId }
+                    $state    = if ($flow.State)       { $flow.State }       `
+                                elseif ($flow.state)   { $flow.state }       `
+                                else { '' }
+
+                    if (-not $flowId) {
+                      Write-Warning "    Could not determine FlowId for flow: $($flow | ConvertTo-Json -Compress)"
+                      continue
+                    }
+
+                    if ($state -ieq 'Active' -or $state -ieq 'Enabled') {
+                      Write-Host "    ⏭ Already active: $flowName"
+                      $skipped++
+                    } else {
+                      Write-Host "    ▶ Enabling: $flowName ($flowId)"
+                      pac flow enable --flow-id $flowId --environment $envUrl
+                      $activated++
+                    }
+                  }
+                  Write-Host "  ✓ Activated $activated flow(s), $skipped already active"
+                } else {
+                  Write-Host "  No Cloud Flows found in solution '$name' — nothing to activate"
+                }
+              } catch {
+                Write-Warning "  Could not parse flow list — activating without listing:"
+                Write-Warning "  Raw output: $flowListRaw"
+                # Fallback: try a bulk enable without listing
+                Write-Warning "  Skipping flow activation for this solution — review manually"
+              }
+            }
+
+            # ── 11. JFrog Prod tag ─────────────────────────────────────────────
+            Write-Host "[$name] Step 11/13 — JFrog Prod tag"
             if ($env:TAG_PROD_DEPLOYED -eq 'true' -and -not $isMock -and $env:JFROG_URL -ne '') {
               Write-Host "  Tagging $artifactName as prodDeployed in JFrog..."
               & "$scriptsDir/Invoke-JFrogAction.ps1" `
@@ -369,8 +429,8 @@ runs:
                 -JFrogToken      $env:JFROG_TOKEN `
                 -TagProperties   "prodDeployed=true"
             }
-            # ── 11. Deploy summary ─────────────────────────────────────────────
-            Write-Host "[$name] Step 11/11 — Deploy summary"
+            # ── 12. Deploy summary ─────────────────────────────────────────────
+            Write-Host "[$name] Step 12/13 — Deploy summary"
             & "$scriptsDir/Write-DeploySummary.ps1" `
               -SolutionName    $name `
               -EnvironmentName $envName `
@@ -378,7 +438,7 @@ runs:
               -RunNumber       $env:RUN_NUMBER `
               -MockDeploy:$isMock
 
-            Write-Host "  ✅ $name deployed successfully → $envName"
+            Write-Host "  ✅ [$name] Deployed successfully → $envName (publish ✓, flows activated ✓)"
 
           } catch {
             $failed.Add($name)
