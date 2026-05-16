@@ -5,6 +5,11 @@
 # job-level `uses:` + `strategy.matrix` (the only valid GitHub pattern for
 # calling reusable workflows in parallel across a matrix).
 #
+# After all build jobs complete:
+#   validate – prints all pipeline toggles, environment URLs, and service
+#              connection status. Fails non-mock runs if secrets or URLs are
+#              missing. Appears as a job inside the Build stage group in the UI.
+#
 # Export mode (combined-pipeline):
 #   Pass source_environment_url = PP_SDBX_URL to enable _job-build's optional
 #   export-solution step, which exports from sandbox before packing.
@@ -61,6 +66,88 @@ on:
         type: string
         default: 'CriticalIssueCount'
 
+      # ── Validate job inputs (pipeline context forwarded from caller) ──────────
+      enable_backup:
+        description: 'Whether pre-import backups are enabled'
+        required: false
+        type: boolean
+        default: false
+      trigger_upgrade:
+        description: 'Whether holding-solution upgrade pattern is enabled'
+        required: false
+        type: boolean
+        default: false
+      base_solutions:
+        description: 'Comma-separated base solution names to verify'
+        required: false
+        type: string
+        default: ''
+      solution_count:
+        description: 'Number of solutions in this run'
+        required: false
+        type: string
+        default: ''
+      solution_list:
+        description: 'Comma-separated solution names in this run'
+        required: false
+        type: string
+        default: ''
+      pp_sdbx_url:
+        description: 'Power Platform sandbox URL'
+        required: false
+        type: string
+        default: ''
+      pp_dev_url:
+        description: 'Power Platform Dev environment URL'
+        required: false
+        type: string
+        default: ''
+      pp_intg_url:
+        description: 'Power Platform Intg environment URL'
+        required: false
+        type: string
+        default: ''
+      pp_uat_url:
+        description: 'Power Platform UAT environment URL'
+        required: false
+        type: string
+        default: ''
+      pp_frs_url:
+        description: 'Power Platform FRS environment URL'
+        required: false
+        type: string
+        default: ''
+      pp_perf_url:
+        description: 'Power Platform Perf environment URL'
+        required: false
+        type: string
+        default: ''
+      pp_prod_url:
+        description: 'Power Platform Prod environment URL'
+        required: false
+        type: string
+        default: ''
+      pp_app_id_set:
+        description: 'Whether PP_APP_ID secret is configured (pre-evaluated in caller)'
+        required: false
+        type: boolean
+        default: false
+      pp_secret_set:
+        description: 'Whether PP_CLIENT_SECRET secret is configured (pre-evaluated in caller)'
+        required: false
+        type: boolean
+        default: false
+      pp_tenant_set:
+        description: 'Whether PP_TENANT_ID secret is configured (pre-evaluated in caller)'
+        required: false
+        type: boolean
+        default: false
+      gha_core_pat_set:
+        description: 'Whether GHA_CORE_PAT secret is configured (pre-evaluated in caller)'
+        required: false
+        type: boolean
+        default: false
+
 jobs:
   build:
     name: Build — ${{ matrix.solution.name }}
@@ -82,3 +169,140 @@ jobs:
       jfrog_url:              ${{ inputs.jfrog_url }}
       jfrog_repo:             ${{ inputs.jfrog_repo }}
     secrets: inherit
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # validate  —  runs after ALL build jobs finish
+  #
+  # Prints all pipeline toggles, environment URLs, and service connection status
+  # so the team can confirm what is on/off before any environment is touched.
+  # Fails non-mock runs if required secrets or environment URLs are missing.
+  # ─────────────────────────────────────────────────────────────────────────────
+  validate:
+    name: "🔎 Validate Pipeline Config"
+    needs: [build]
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Print toggles and validate config
+        shell: pwsh
+        run: |
+          $isMock = '${{ inputs.mock_deploy }}' -eq 'true'
+
+          function Flag($v) { if ($v -eq 'true') { '🟢 ON' } else { '🔴 OFF' } }
+
+          Write-Host ""
+          Write-Host "═══════════════════════════════════════════════════════════"
+          Write-Host "   PIPELINE CONFIGURATION  —  Run #${{ github.run_number }}"
+          Write-Host "═══════════════════════════════════════════════════════════"
+          Write-Host ""
+          Write-Host "── Toggles ─────────────────────────────────────────────"
+          Write-Host ("  {0,-24} {1}" -f "mock_deploy",         (Flag '${{ inputs.mock_deploy }}'))
+          Write-Host ("  {0,-24} {1}" -f "enable_backup",       (Flag '${{ inputs.enable_backup }}'))
+          Write-Host ("  {0,-24} {1}" -f "trigger_upgrade",     (Flag '${{ inputs.trigger_upgrade }}'))
+          Write-Host ("  {0,-24} {1}" -f "checker_error_level", '${{ inputs.checker_error_level || 'HighIssue' }}')
+          Write-Host ("  {0,-24} {1}" -f "base_solutions",      '${{ inputs.base_solutions || '(none)' }}')
+          Write-Host ""
+          Write-Host "── Solutions ───────────────────────────────────────────"
+          Write-Host ("  {0,-24} {1}" -f "Count",  '${{ inputs.solution_count }}')
+          Write-Host ("  {0,-24} {1}" -f "List",   '${{ inputs.solution_list }}')
+          Write-Host ""
+          Write-Host "── Environment URLs ────────────────────────────────────"
+          $urls = [ordered]@{
+            'Sandbox (export)' = '${{ inputs.pp_sdbx_url }}'
+            'Dev'              = '${{ inputs.pp_dev_url }}'
+            'Intg'             = '${{ inputs.pp_intg_url }}'
+            'UAT'              = '${{ inputs.pp_uat_url }}'
+            'FRS'              = '${{ inputs.pp_frs_url }}'
+            'Perf'             = '${{ inputs.pp_perf_url }}'
+            'Prod'             = '${{ inputs.pp_prod_url }}'
+          }
+          $missingUrls = [System.Collections.Generic.List[string]]::new()
+          foreach ($e in $urls.GetEnumerator()) {
+            if ($e.Value) {
+              Write-Host ("  {0,-20} ✅  {1}" -f $e.Key, $e.Value)
+            } else {
+              Write-Host ("  {0,-20} ❌  NOT SET" -f $e.Key)
+              $missingUrls.Add($e.Key)
+            }
+          }
+          Write-Host ""
+          Write-Host "── Service Connections ─────────────────────────────────"
+          $ppAppIdSet    = '${{ inputs.pp_app_id_set }}'    -eq 'true'
+          $ppSecretSet   = '${{ inputs.pp_secret_set }}'    -eq 'true'
+          $ppTenantSet   = '${{ inputs.pp_tenant_set }}'    -eq 'true'
+          $ghaCorePatSet = '${{ inputs.gha_core_pat_set }}' -eq 'true'
+          if ($isMock) {
+            Write-Host "  PP_APP_ID            ⚠️  skipped (mock_deploy=true)"
+            Write-Host "  PP_CLIENT_SECRET     ⚠️  skipped (mock_deploy=true)"
+            Write-Host "  PP_TENANT_ID         ⚠️  skipped (mock_deploy=true)"
+          } else {
+            $s1 = if ($ppAppIdSet)  { '✅  Set' } else { '❌  NOT SET' }
+            $s2 = if ($ppSecretSet) { '✅  Set' } else { '❌  NOT SET' }
+            $s3 = if ($ppTenantSet) { '✅  Set' } else { '❌  NOT SET' }
+            Write-Host ("  {0,-20} {1}" -f "PP_APP_ID",        $s1)
+            Write-Host ("  {0,-20} {1}" -f "PP_CLIENT_SECRET", $s2)
+            Write-Host ("  {0,-20} {1}" -f "PP_TENANT_ID",     $s3)
+          }
+          $s4 = if ($ghaCorePatSet) { '✅  Set' } else { '❌  NOT SET' }
+          Write-Host ("  {0,-20} {1}" -f "GHA_CORE_PAT", $s4)
+          Write-Host ""
+          Write-Host "── JFrog ───────────────────────────────────────────────"
+          $jfrogUrl = '${{ inputs.jfrog_url }}'
+          if ($jfrogUrl) {
+            Write-Host "  JFROG_URL            ✅  $jfrogUrl"
+            Write-Host ("  JFROG_REPO           {0}" -f '${{ inputs.jfrog_repo || 'power-platform' }}')
+          } else {
+            Write-Host "  JFrog                ⚠️  Not configured (jfrog_url not set) — archival disabled"
+          }
+          Write-Host ""
+          Write-Host "═══════════════════════════════════════════════════════════"
+
+          # ── Step summary (rendered as a table in GitHub Actions UI) ─────────
+          $md  = "## Pipeline Configuration — Run #${{ github.run_number }}`n`n"
+          $md += "### Toggles`n`n| Toggle | Value |`n|---|---|`n"
+          $md += "| mock_deploy | $(Flag '${{ inputs.mock_deploy }}') |`n"
+          $md += "| enable_backup | $(Flag '${{ inputs.enable_backup }}') |`n"
+          $md += "| trigger_upgrade | $(Flag '${{ inputs.trigger_upgrade }}') |`n"
+          $md += "| checker_error_level | ``${{ inputs.checker_error_level || 'HighIssue' }}`` |`n"
+          $md += "| base_solutions | ``${{ inputs.base_solutions || '(none)' }}`` |`n`n"
+          $md += "### Solutions (${{ inputs.solution_count }})`n`n"
+          $md += "${{ inputs.solution_list }}`n`n"
+          $md += "### Environment URLs`n`n| Environment | Status |`n|---|---|`n"
+          foreach ($e in $urls.GetEnumerator()) {
+            $urlStatus = if ($e.Value) { "✅ ``$($e.Value)``" } else { "❌ **NOT SET**" }
+            $md += "| $($e.Key) | $urlStatus |`n"
+          }
+          $md += "`n### Service Connections`n`n| Secret | Status |`n|---|---|`n"
+          if ($isMock) {
+            $md += "| PP credentials | ⚠️ Skipped (mock_deploy=true) |`n"
+          } else {
+            $md += "| PP_APP_ID | $(if ($ppAppIdSet) { '✅ Set' } else { '❌ **NOT SET**' }) |`n"
+            $md += "| PP_CLIENT_SECRET | $(if ($ppSecretSet) { '✅ Set' } else { '❌ **NOT SET**' }) |`n"
+            $md += "| PP_TENANT_ID | $(if ($ppTenantSet) { '✅ Set' } else { '❌ **NOT SET**' }) |`n"
+          }
+          $md += "| GHA_CORE_PAT | $(if ($ghaCorePatSet) { '✅ Set' } else { '❌ **NOT SET**' }) |`n"
+          if ($jfrogUrl) {
+            $md += "`n### JFrog`n`n✅ Configured — ``$jfrogUrl```n"
+          } else {
+            $md += "`n### JFrog`n`n⚠️ Not configured — archival disabled`n"
+          }
+          $md | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+          # ── Fail non-mock if credentials or URLs are missing ─────────────────
+          if (-not $isMock) {
+            $errors = [System.Collections.Generic.List[string]]::new()
+            if (-not $ppAppIdSet)    { $errors.Add('PP_APP_ID secret is not set') }
+            if (-not $ppSecretSet)   { $errors.Add('PP_CLIENT_SECRET secret is not set') }
+            if (-not $ppTenantSet)   { $errors.Add('PP_TENANT_ID secret is not set') }
+            if ($missingUrls.Count -gt 0) {
+              $errors.Add("Environment URLs not configured: $($missingUrls -join ', ')")
+            }
+            if ($errors.Count -gt 0) {
+              Write-Host ""
+              foreach ($err in $errors) { Write-Host "  ❌ $err" }
+              Write-Error "Pipeline validation failed — fix the above before deploying"
+              exit 1
+            }
+          }
+          Write-Host "  ✅ Validation passed"

@@ -2,19 +2,18 @@
 # _stage-export.yml  —  Reusable EXPORT STAGE
 #
 # Fans out per solution (parallel) and for each solution:
-#   1. ci-bootstrap   – checkout, Azure OIDC login, AKV secrets, merge vars
-#   2. pac-install    – install PAC CLI
+#   1. ci-bootstrap    – checkout, Azure OIDC login, AKV secrets, merge vars
+#   2. pac-install     – install PAC CLI
 #   3. export-solution – export unmanaged ZIP from sandbox, unpack to source tree
 #   4. upload-artifact – upload unpacked source as exported-source-<name> artifact
 #
-# The build stage (_stage-build.yml) downloads these artifacts when
-# use_exported_source=true, so each runner gets the freshly-exported source.
+# After all exports complete:
+#   5. commit – create feature/pipeline-{run_number} from origin/main, copy
+#               exported source, write pipeline-context.json, push to origin.
+#               Git operations are always real — mock_deploy only suppresses PP imports.
 #
-# This stage is SKIPPED when:
-#   • combined-pipeline.yml skip_export=true
-#   • combined-pipeline.yml mock_deploy=true
-# The build stage handles both cases via use_exported_source=false (builds from
-# the committed src/solutions/ tree instead).
+# Outputs:
+#   feature_branch – the branch name created and pushed by the commit job
 # ─────────────────────────────────────────────────────────────────────────────
 on:
   workflow_call:
@@ -28,10 +27,19 @@ on:
         required: true
         type: string
       mock_deploy:
-        description: 'Should always be false when this stage runs — guard kept for safety'
+        description: 'Simulate export (no real PP connection) — git operations still run'
         required: false
         type: boolean
         default: false
+      solution_list:
+        description: 'Comma-separated solution names — used by the commit job to copy source trees'
+        required: true
+        type: string
+
+    outputs:
+      feature_branch:
+        description: 'Feature branch created and pushed by the commit job'
+        value: ${{ jobs.commit.outputs.feature_branch }}
 
 jobs:
   export:
@@ -79,3 +87,104 @@ jobs:
           path: ${{ steps.export.outputs.source_folder }}/${{ matrix.solution.name }}/
           retention-days: 1   # short-lived — only needed within the same pipeline run
           if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # commit  —  runs after ALL export jobs finish
+  #
+  # Creates feature/pipeline-{run_number} from origin/main, copies the exported
+  # source trees, writes pipeline-context.json, and pushes. Always real git —
+  # mock_deploy only suppresses Power Platform imports, not git operations.
+  # ─────────────────────────────────────────────────────────────────────────────
+  commit:
+    name: "🌿 Commit to feature/pipeline-${{ github.run_number }}"
+    needs: [export]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions:  read      # needed by download-artifact@v4 in same run
+
+    outputs:
+      feature_branch: ${{ steps.push.outputs.feature_branch }}
+
+    steps:
+      - name: Checkout repository (full history)
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Download all exported source artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: exported-source-*
+          path: _export-src/
+          merge-multiple: false
+
+      - name: Create branch, copy source, write context, push
+        id: push
+        shell: pwsh
+        run: |
+          $isMock     = '${{ inputs.mock_deploy }}' -eq 'true'
+          $runNumber  = '${{ github.run_number }}'
+          $runAttempt = '${{ github.run_attempt }}'
+          $runId      = '${{ github.run_id }}'
+          $branch     = "feature/pipeline-$runNumber"
+
+          git config user.name  "GitHub Actions"
+          git config user.email "actions@github.com"
+
+          # Always branch from the latest main
+          git fetch origin main
+          git checkout -b $branch origin/main
+          Write-Host "  ✓ Created branch $branch from origin/main"
+
+          $solutions = '${{ inputs.solution_list }}' -split ',' |
+            ForEach-Object { $_.Trim() } | Where-Object { $_ }
+
+          foreach ($sol in $solutions) {
+            $srcDir = "_export-src/exported-source-$sol"
+            $dstDir = "src/solutions/$sol"
+            if (Test-Path $srcDir) {
+              if (Test-Path $dstDir) { Remove-Item $dstDir -Recurse -Force }
+              Copy-Item $srcDir $dstDir -Recurse -Force
+              Write-Host "  ✓ Copied $sol → src/solutions/$sol/"
+            } else {
+              Write-Warning "  ⚠ Exported source not found for $sol at $srcDir — using existing tree"
+            }
+          }
+
+          # pipeline-context.json — read by Pipeline 2 to locate Phase 1 artifacts
+          $ctx = [ordered]@{
+            runId         = $runId
+            runNumber     = $runNumber
+            runAttempt    = $runAttempt
+            solutions     = $solutions
+            solutionList  = '${{ inputs.solution_list }}'
+            matrix        = '${{ inputs.matrix }}'
+            featureBranch = $branch
+            triggeredBy   = '${{ github.actor }}'
+            triggeredAt   = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ')
+            mockDeploy    = $isMock
+          }
+          $ctx | ConvertTo-Json -Depth 3 | Set-Content 'pipeline-context.json' -Encoding UTF8
+          Write-Host "  ✓ Written pipeline-context.json (runId=$runId)"
+
+          if (Test-Path '_export-src') { Remove-Item '_export-src' -Recurse -Force }
+
+          git add src/solutions/ pipeline-context.json
+
+          $status = git status --porcelain
+          if ($status) {
+            $mockTag = if ($isMock) { ' [mock]' } else { '' }
+            $commitMsg = "chore: export from sandbox — pipeline run #$runNumber$mockTag [skip ci]"
+            git commit -m $commitMsg
+            Write-Host "  ✓ Committed: $commitMsg"
+          } else {
+            Write-Host "  ℹ No source changes — branch pointer only"
+          }
+
+          # Always push — mock_deploy only skips PP imports, not git operations
+          git push origin $branch
+          Write-Host "  ✓ Pushed branch $branch to origin"
+
+          "feature_branch=$branch" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
