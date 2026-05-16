@@ -13,8 +13,8 @@
 # choice constraint is enforced by the workflow_dispatch in rollback.yml.
 # Here it is received as a plain string.
 #
-# LIMITATION: If the deployment used trigger_upgrade (holding pattern) and
-# removed components, those components are NOT restored by this import.
+# NOTE: Rollback imports the backup as a standard Managed solution import.
+# Components removed by the original deployment are NOT restored.
 # Use a full environment restore for that case.
 # =============================================================================
 
