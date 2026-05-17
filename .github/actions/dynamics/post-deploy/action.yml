@@ -1,3 +1,30 @@
+# =============================================================================
+# COMPOSITE ACTION: Post-Deploy
+# =============================================================================
+# Runs three finalisation steps after a successful solution import.
+# Called once per solution per environment, always runs unless mock.
+#
+# STEP 1 — Publish customizations (non-mock, import not skipped):
+#   Calls microsoft/powerplatform-actions/publish-solution to publish all
+#   unpublished customizations in the target environment. This is required after
+#   every managed import to make changes visible to users. Skipped if the import
+#   was skipped (version already current) — no new customizations to publish.
+#   NOTE: deploy-all-solutions handles publish internally for the upgrade pattern
+#   (stage-and-upgrade publishes during apply-upgrade). This step is for
+#   standard imports that set publish-changes=false on the import action itself.
+#
+# STEP 2 — JFrog Prod tag (Prod only, tag_prod_deployed=true):
+#   Calls Invoke-JFrogAction.ps1 with action="tag-prod" to set
+#   prodDeployed=true and deployedDate=<date> properties on the artifact in
+#   JFrog Artifactory. Provides a permanent audit trail linking the build
+#   artifact to its Prod deployment. Only triggered for Prod — not for pre-prod
+#   environments.
+#
+# STEP 3 — Deploy summary (always, including mock):
+#   Calls Write-DeploySummary.ps1 to append a per-solution deployment table
+#   to GITHUB_STEP_SUMMARY and write a JSON record to job-summaries/ for the
+#   consolidated pipeline summary produced by Write-PipelineSummary.ps1.
+# =============================================================================
 name: 'Post-Deploy'
 description: 'Publishes customizations, writes the deploy summary, and tags the JFrog artifact as prodDeployed'
 

@@ -1,3 +1,32 @@
+# =============================================================================
+# COMPOSITE ACTION: Export Solution from Environment
+# =============================================================================
+# Exports an unmanaged solution from a Power Platform environment (typically
+# the sandbox) and unpacks it to a local source tree ready for the build stage.
+#
+# FLOW (real mode):
+#   1. export-solution  — downloads the unmanaged ZIP from the source environment
+#                         (PP_SDBX_URL) into export_folder/zips/
+#   2. unpack-solution  — expands the ZIP into export_folder/<solution_name>/
+#                         with canvas app processing and file overwrite enabled
+#   3. set-source output — outputs the export_folder path so pack-solution knows
+#                         where to read the source from
+#
+# OUTPUT — source_folder:
+#   Real mode : export_folder (e.g. 'export-src') — the freshly unpacked tree
+#   Mock mode : 'src/solutions' — the committed source tree used as-is
+#   Pass this output as solution_source_folder to the pack-solution action.
+#
+# MOCK MODE:
+#   The export and unpack steps are skipped entirely. The existing committed
+#   source in src/solutions/<name> is reused for packing. Useful for validating
+#   the build and deploy stages without requiring a live sandbox connection.
+#
+# NOTE — where this action fits:
+#   Called only in the combined-pipeline (export → build → deploy in one run).
+#   The release-pipeline skips export and packs directly from committed source.
+#   See _job-build.yml input use_exported_source for the switching logic.
+# =============================================================================
 name: 'Export Solution from Environment'
 description: >
   Exports a solution from a Power Platform environment, unpacks it to a local

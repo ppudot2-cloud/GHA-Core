@@ -1,3 +1,29 @@
+# =============================================================================
+# COMPOSITE ACTION: Export Config Data
+# =============================================================================
+# Exports configuration/reference data from a Power Platform environment using
+# the Configuration Migration tool schema.
+#
+# WHAT IS CONFIGURATION MIGRATION DATA?
+#   Power Platform solutions package *schema* (tables, columns, forms, flows)
+#   but not *data* (records). Configuration Migration data covers records that
+#   belong to the solution — e.g. lookup values, approval matrices, role mappings,
+#   or any reference data that must be consistent across environments.
+#   The schema XML (data_schema_file) defines which tables and records to export.
+#
+# WHEN IS IT USED?
+#   Only solutions that carry environment-agnostic reference data need this step.
+#   Set dataSchemaFile in solutions.json to the schema path; leave it empty to skip.
+#   The exported ZIP (config-data/<name>-data.zip) is included in the
+#   solution-artifact uploaded by _job-build and imported at deploy time when
+#   import_config_data=true.
+#
+# BRANCHING LOGIC:
+#   data_schema_file != '' + mock_deploy != 'true'  → real export via export-data action
+#   data_schema_file != '' + mock_deploy == 'true'  → simulation via Export-ConfigDataSim.ps1
+#                                                     (parses schema, creates placeholder ZIP)
+#   data_schema_file == ''                          → step skipped entirely
+# =============================================================================
 name: 'Export Config Data'
 description: 'Exports configuration migration data from the source environment'
 

@@ -1,3 +1,38 @@
+# =============================================================================
+# COMPOSITE ACTION: Import Solution
+# =============================================================================
+# Imports a Power Platform solution ZIP into a target environment using PAC CLI.
+#
+# IMPORT MODES — four branches controlled by trigger_upgrade + settings_file_resolved:
+#
+#   Standard install, no settings  — solution is new or force-overwritten,
+#     no deployment-settings substitution needed.
+#
+#   Standard install, with settings — same as above but a token-substituted
+#     deployment-settings.json is passed to override connection references,
+#     environment variables, and other per-environment values.
+#
+#   Stage-and-upgrade, no settings  — used when the solution ALREADY EXISTS
+#     in the target environment. Imports as a "holding" solution first (keeps
+#     the active version running during import), then calls upgrade-solution to
+#     apply the new version atomically. Reduces downtime vs direct overwrite.
+#
+#   Stage-and-upgrade, with settings — stage-and-upgrade pattern plus
+#     deployment-settings substitution.
+#
+# SKIP LOGIC:
+#   When skip_import=true (set by pre-deploy-checks version compare), all import
+#   and upgrade steps are bypassed and a notice is logged. The solution is already
+#   at the same or newer version.
+#
+# CONFIG DATA IMPORT:
+#   After solution import, if import_config_data=true and data_file is provided,
+#   configuration migration data is imported via microsoft/powerplatform-actions/import-data.
+#   This runs after solution import because the solution's tables must exist first.
+#
+# MOCK MODE:
+#   All real import/upgrade/data steps are skipped; a mock log line is printed.
+# =============================================================================
 name: 'Import Solution'
 description: 'Imports a managed solution into a Power Platform environment (with optional holding-pattern upgrade)'
 

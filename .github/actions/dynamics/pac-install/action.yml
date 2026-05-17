@@ -1,6 +1,23 @@
 # =============================================================================
 # COMPOSITE ACTION: Install PAC CLI
 # =============================================================================
+# Installs the Power Platform CLI (PAC) and adds it to PATH.
+#
+# WHY A SEPARATE ACTION?
+#   Every job that interacts with Power Platform (build, deploy, export) needs
+#   PAC CLI. Wrapping the install in a named composite action ensures all jobs
+#   use the same install mechanism and version, and keeps individual job step
+#   lists clean (one step vs. repeating the raw uses: + with: everywhere).
+#
+# PAC CLI is installed via microsoft/powerplatform-actions/actions-install,
+# which fetches the latest stable release from the Microsoft feed and adds it
+# to PATH so subsequent steps can call `pac` directly without a full path.
+#
+# USED BY:
+#   - _job-build.yml    — needed for solution pack and Solution Checker
+#   - _job-deploy.yml   — needed for solution import and publish
+#   - export-solution   — needed for pac solution export
+# =============================================================================
 name: 'Install PAC CLI'
 description: 'Install Power Platform CLI (PAC) and add to PATH'
 

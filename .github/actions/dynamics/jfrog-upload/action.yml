@@ -1,3 +1,35 @@
+# =============================================================================
+# COMPOSITE ACTION: JFrog Upload
+# =============================================================================
+# Uploads the built solution artifacts to JFrog Artifactory for long-term
+# storage and traceability. Called by _job-build AFTER Solution Checker passes.
+#
+# WHY JFROG (not just GitHub artifact storage)?
+#   GitHub artifacts have a configurable retention window (default 7 days here).
+#   JFrog provides indefinite retention with property-based search, enabling:
+#     - Audit queries: "which build deployed to Prod on date X?"
+#     - Version history across all solutions and environments
+#     - prodDeployed tagging (set by post-deploy after Prod succeeds)
+#
+# WHAT IS UPLOADED?
+#   Per-solution folder in JFrog: <repo>/<github-repo>/<solution>/<run#>-<attempt>/
+#     - <solution>_unmanaged.zip  — unmanaged ZIP (source record)
+#     - <solution>_managed.zip    — managed ZIP (deployed to non-Dev environments)
+#     - solution-checker/*.sarif  — Solution Checker SARIF report
+#
+# ARTIFACT NAMING:
+#   artifact_name = solution-<Name>-run<run_number>[-a<attempt>]
+#   The run attempt suffix is omitted on attempt 1 for readability.
+#   Re-runs produce a distinct artifact name so they never overwrite prior attempts.
+#
+# PROD TAGGING (separate step, not here):
+#   After a successful Prod deploy, Invoke-JFrogAction.ps1 -Action tag sets
+#   prodDeployed=true and deployedDate=<date> properties on the artifact.
+#   This tagging happens in post-deploy/action.yml, not in this upload action.
+#
+# MOCK MODE:
+#   Invoke-JFrogAction.ps1 is called with -MockDeploy:$true; no network calls made.
+# =============================================================================
 name: 'JFrog Upload'
 description: 'Uploads solution artifacts to JFrog Artifactory after a successful build'
 
