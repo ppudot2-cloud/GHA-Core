@@ -81,7 +81,7 @@ runs:
       if: ${{ inputs.mock_deploy == 'true' }}
       shell: pwsh
       run: |
-        & .ci/.github/workflows/scripts/dynamics/Invoke-SolutionCheckerSim.ps1 `
+        & .ci/.github/scripts/dynamics/Invoke-SolutionCheckerSim.ps1 `
           -SolutionName  '${{ inputs.solution_name }}' `
           -UnmanagedZip  '${{ inputs.unmanaged_zip }}' `
           -ManagedZip    '${{ inputs.managed_zip }}' `
