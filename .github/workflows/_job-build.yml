@@ -213,4 +213,4 @@ jobs:
             -SolutionVersion "${{ steps.pack.outputs.version }}" `
             -ArtifactName    "${{ steps.pack.outputs.artifact_name }}" `
             -RunNumber       "${{ github.run_number }}" `
-            -MockDeploy:${{ inputs.mock_deploy == true }}
+            -MockDeploy:$${{ inputs.mock_deploy == true }}
