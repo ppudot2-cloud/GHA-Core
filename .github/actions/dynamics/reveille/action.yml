@@ -8,8 +8,8 @@
 # NOTE: Composite actions cannot access ${{ secrets.* }} directly.
 #       Callers must expose GHA_CORE_PAT via env: GHA_CORE_PAT on the step.
 # =============================================================================
-name: 'CI Bootstrap'
-description: 'Checkout repos, Azure OIDC login, fetch AKV secrets, merge global+project variables, register JFrog PS repo'
+name: 'Reveille'
+description: 'Reveille — wake the runner: checkout repos, Azure OIDC login, fetch AKV secrets, merge variables, register module sources'
 
 inputs:
   mock_deploy:
