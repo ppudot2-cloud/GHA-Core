@@ -10,26 +10,42 @@
 #   • download-artifact has run     → solution-artifact-* downloaded to workspace
 #                                     (out/<artifactName>/ and config-data/ are present)
 #
-# Artifact flow:
-#   _stage-build uploads solution-artifact-<name> to GitHub artifact storage ONCE.
-#   _stage-deploy-chain downloads all solution-artifact-* before calling this action.
-#   JFrog is NOT used for downloads during deploy — only for Prod tagging (step 10).
+# Execution order (rationale: pre-flight checks must ALL pass BEFORE ServiceNow
+# is opened — opening a CR triggers approval notifications, change windows, and
+# audits. Opening one only to discover a blocking async op or that the version is
+# already current is wasteful and creates unnecessary noise in ServiceNow):
 #
-# For each solution in solutions_json (in order):
-#   1.  Verify artifact is present locally (pre-downloaded by calling job)
-#   2.  Resolve deployment-settings token substitution
-#   3.  Verify base solutions present (pac solution list)
-#   4.  Blocking check (Invoke-BlockingCheck.ps1)
-#   5.  Version compare  → sets skip_import flag (Compare-SolutionVersion.ps1)
-#   6.  Find solution    → check if solution exists in target env (first install vs upgrade)
-#   7.  Backup current solution (pac solution export)
-#   8.  Import: standard or stage-and-upgrade (pac solution import / upgrade)
-#   9.  Import configuration migration data if requested (pac data import)
-#  10.  Publish customizations (pac solution publish)
-#  11.  Activate Cloud Flows (pac flow list + pac flow enable per flow)
-#  12.  Tag JFrog artifact as prodDeployed (Prod only)
-#  13.  Write per-solution deploy summary (Write-DeploySummary.ps1)
-#  14.  Upload backup artifact (GitHub artifact, outside loop)
+#   STEP A — PAC auth (needed by pre-flight base-solution + blocking checks)
+#
+#   STEP B — Pre-flight loop (ALL solutions, no ServiceNow involvement):
+#     1.  Verify artifact present
+#     2.  Resolve deployment-settings tokens
+#     3.  Verify base solutions are installed (pac solution list)
+#     4.  Blocking check (Invoke-BlockingCheck.ps1)
+#     5.  Version compare → sets skip_import flag (Compare-SolutionVersion.ps1)
+#   → Writes preflight-results.json with per-solution skip_import flags
+#   → Fails immediately if ANY check fails (ServiceNow is never opened)
+#
+#   STEP C — ServiceNow Pre-Deploy (Open CR + Approval Gate)
+#   → Blocks the pipeline until SNOW change request is approved
+#   → Only runs if enable_servicenow=true
+#   → Only reached after ALL pre-flight checks pass
+#
+#   STEP D — Deploy loop (ALL solutions, SNOW already approved):
+#     6.  Find solution in target env   → first install vs upgrade
+#     7.  Backup current solution       → only on upgrades
+#     8.  Import: standard or stage-and-upgrade
+#     9.  Import configuration migration data (Prod only)
+#    10.  Publish customizations
+#    11.  Activate Cloud Flows + Classic Workflows
+#    12.  Tag JFrog artifact as prodDeployed (Prod only)
+#    13.  Write per-solution deploy summary
+#
+#   STEP E — ServiceNow Post-Deploy (if: always())
+#   → Reads SNOW_DEPLOY_STATUS written by deploy loop
+#   → Closes CR as successful or unsuccessful
+#
+#   STEP F — Upload backup artifact (GitHub artifact, 30 day retention)
 #
 # All steps respect mock_deploy — no Dataverse or JFrog calls are made.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -75,7 +91,7 @@ inputs:
     required: false
     default: 'false'
   previous_environment_url:
-    description: 'URL of the prior environment (used for previous-env data export context; informational)'
+    description: 'URL of the prior environment (used by version compare to check promotion chain)'
     required: false
     default: ''
   base_solutions:
@@ -107,8 +123,7 @@ inputs:
       When true: opens a CR before deployment, polls for approval, and closes the
       CR after deployment. Must have servicenow_enabled=true in reveille so
       AKV credentials (SERVICENOWMURI, SNOW_OAUTH_CLIENT_ID/SECRET) are available.
-      Non-prod: optional — pass true to enable. Default false.
-      Prod: always 'true' — hardcoded by the caller, no user override.
+      NOTE: ServiceNow is only opened AFTER all pre-flight checks pass.
     required: false
     default: 'false'
   solution_list:
@@ -126,22 +141,10 @@ runs:
   using: composite
   steps:
 
-    # ── ServiceNow Pre-Deploy: Steps 1-8 (open CR → approval gate) ──────────
-    # Runs BEFORE PAC auth and solution deployment.
-    # Blocks the pipeline until the SNOW change request is approved.
-    # Non-prod: runs only when enable_servicenow=true.
-    # Prod: always runs (enable_servicenow is hardcoded 'true' by the caller).
-    - name: ServiceNow — Pre-Deploy (Open CR + Approval Gate)
-      if: ${{ inputs.enable_servicenow == 'true' }}
-      uses: ppudot2-cloud/GHA-Core/.github/actions/dynamics/servicenow-change@main
-      with:
-        phase:            pre-deploy
-        environment_name: ${{ inputs.environment_name }}
-        solution_list:    ${{ inputs.solution_list }}
-        sarif_path:       ${{ inputs.sarif_path }}
-        mock_deploy:      ${{ inputs.mock_deploy }}
-
-    # ── Authenticate PAC CLI against the target environment ───────────────────
+    # ── STEP A: PAC auth ──────────────────────────────────────────────────────
+    # Authenticates PAC CLI before pre-flight checks run.
+    # Base-solution verification (step 3) and version compare (step 5) both
+    # need PAC CLI to query the target environment.
     - name: PAC auth — ${{ inputs.environment_name }}
       shell: pwsh
       run: |
@@ -158,7 +161,184 @@ runs:
           pac auth select --name "target-${{ inputs.environment_name }}"
         }
 
-    # ── Deploy every solution in sequence ─────────────────────────────────────
+    # ── STEP B: Pre-flight checks (ALL solutions, before ServiceNow) ──────────
+    # Runs verify-artifact, resolve-settings, base-solutions, blocking-check,
+    # and version-compare across EVERY solution before a ServiceNow CR is opened.
+    # Any failure here aborts the deployment without ever touching ServiceNow.
+    # Writes preflight-results.json with per-solution skip_import flags so the
+    # deploy loop can respect version-compare decisions made here.
+    - name: Pre-flight checks — ${{ inputs.environment_name }}
+      shell: pwsh
+      env:
+        SOLUTIONS_JSON:            ${{ inputs.solutions_json }}
+        ENVIRONMENT_NAME:          ${{ inputs.environment_name }}
+        ENVIRONMENT_URL:           ${{ inputs.environment_url }}
+        ENABLE_BLOCKING_CHECK:     ${{ inputs.enable_blocking_check }}
+        ENABLE_VERSION_COMPARE:    ${{ inputs.enable_version_compare }}
+        MOCK_DEPLOY:               ${{ inputs.mock_deploy }}
+        BASE_SOLUTIONS:            ${{ inputs.base_solutions }}
+        RUN_NUMBER:                ${{ inputs.run_number }}
+        RUN_ATTEMPT:               ${{ inputs.run_attempt }}
+        PREVIOUS_ENV_URL:          ${{ inputs.previous_environment_url }}
+      run: |
+        Set-StrictMode -Version Latest
+        $ErrorActionPreference = 'Stop'
+
+        $scriptsDir = "$env:GITHUB_WORKSPACE/.ci/.github/scripts/dynamics"
+        $isMock     = $env:MOCK_DEPLOY -eq 'true'
+        $envName    = $env:ENVIRONMENT_NAME
+        $envUrl     = $env:ENVIRONMENT_URL
+        $envLower   = $envName.ToLower()
+
+        $parsed    = $env:SOLUTIONS_JSON | ConvertFrom-Json
+        $solutions = if ($parsed.solution) { $parsed.solution } else { $parsed }
+
+        Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        Write-Host "  PRE-FLIGHT CHECKS — $($solutions.Count) solution(s) → $envName"
+        Write-Host "  (All checks must pass before ServiceNow is opened)"
+        Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+        $results = [System.Collections.Generic.List[hashtable]]::new()
+
+        foreach ($sol in $solutions) {
+          $name       = $sol.name
+          $prefix     = if ($sol.deployment_settings_prefix) { $sol.deployment_settings_prefix } else { 'deployment-settings' }
+          $outDir     = "out/$name"
+          $settingsFile     = "$prefix/$envLower/$name.json"
+          $settingsResolved = "$outDir/deployment-settings-resolved.json"
+          $skipImport = $false
+
+          Write-Host ""
+          Write-Host "::group::[$name] Pre-flight → $envName"
+
+          # ── 1. Verify artifact present ─────────────────────────────────────
+          Write-Host "[$name] Pre-flight 1/5 — Verify artifact present"
+          $managedZip = (Get-ChildItem -Path $outDir -Filter "*_managed.zip" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName)
+          if ($isMock) {
+            Write-Host "  [MOCK] Skipping artifact check" -ForegroundColor Cyan
+            New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+            $managedZip = "$outDir/${name}_mock_managed.zip"
+            New-Item -ItemType File -Force -Path $managedZip | Out-Null
+          } else {
+            if (-not $managedZip -or -not (Test-Path $managedZip)) {
+              throw "[$name] Managed ZIP not found in '$outDir'. Ensure download-artifact succeeded and the artifact name matches 'solution-artifact-$name'."
+            }
+            Write-Host "  ✓ Artifact found: $managedZip"
+          }
+
+          # ── 2. Resolve deployment-settings tokens ──────────────────────────
+          Write-Host "[$name] Pre-flight 2/5 — Resolve deployment settings"
+          if ((Test-Path $settingsFile) -and -not $isMock) {
+            $content = Get-Content $settingsFile -Raw
+            $tokenMatches = [regex]::Matches($content, '#\{([^}]+)\}#')
+            foreach ($m in $tokenMatches) {
+              $varName  = $m.Groups[1].Value
+              $varValue = [System.Environment]::GetEnvironmentVariable($varName)
+              if ($null -ne $varValue) {
+                $content = $content.Replace($m.Value, $varValue)
+              } else {
+                Write-Warning "  Token $($m.Value) has no env var '$varName' — leaving unreplaced"
+              }
+            }
+            New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+            $content | Set-Content $settingsResolved -Encoding UTF8
+            Write-Host "  Resolved settings written to: $settingsResolved"
+          } else {
+            $settingsResolved = ''
+            if ($isMock) { Write-Host "  [MOCK] Token resolution skipped" -ForegroundColor Cyan }
+            else          { Write-Host "  No settings file at $settingsFile — skipping" -ForegroundColor Yellow }
+          }
+
+          # ── 3. Verify base solutions ───────────────────────────────────────
+          Write-Host "[$name] Pre-flight 3/5 — Verify base solutions"
+          if ($env:BASE_SOLUTIONS -ne '' -and -not $isMock) {
+            $bases = $env:BASE_SOLUTIONS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+            foreach ($base in $bases) {
+              Write-Host "  Verifying '$base' is installed in $envName..."
+              $list = pac solution list --environment $envUrl 2>&1
+              if ($list -notmatch [regex]::Escape($base)) {
+                throw "[$name] Base solution '$base' is not installed in $envName. Install it before deploying $name."
+              }
+              Write-Host "  ✓ '$base' found"
+            }
+          } elseif ($isMock) {
+            Write-Host "  [MOCK] Base solution check skipped" -ForegroundColor Cyan
+          } else {
+            Write-Host "  No base solutions specified — skipping"
+          }
+
+          # ── 4. Blocking check ──────────────────────────────────────────────
+          Write-Host "[$name] Pre-flight 4/5 — Blocking check"
+          if ($env:ENABLE_BLOCKING_CHECK -eq 'true' -and -not $isMock) {
+            & "$scriptsDir/Invoke-BlockingCheck.ps1" `
+              -EnvironmentUrl  $envUrl `
+              -EnvironmentName $name `
+              -AppId           $env:PP_APP_ID `
+              -ClientSecret    $env:PP_CLIENT_SECRET `
+              -TenantId        $env:PP_TENANT_ID
+          } elseif ($isMock) {
+            Write-Host "  [MOCK] Blocking check skipped" -ForegroundColor Cyan
+          } else {
+            Write-Host "  enable_blocking_check=false — skipping"
+          }
+
+          # ── 5. Version compare ─────────────────────────────────────────────
+          Write-Host "[$name] Pre-flight 5/5 — Version compare"
+          if ($env:ENABLE_VERSION_COMPARE -eq 'true' -and -not $isMock) {
+            $result = & "$scriptsDir/Compare-SolutionVersion.ps1" `
+              -SolutionName           $name `
+              -ArtifactFolder         $outDir `
+              -PreviousEnvironmentUrl $env:PREVIOUS_ENV_URL `
+              -TargetEnvironmentUrl   $envUrl `
+              -AppId                  $env:PP_APP_ID `
+              -ClientSecret           $env:PP_CLIENT_SECRET `
+              -TenantId               $env:PP_TENANT_ID
+            $skipImport = ($result -eq 'true')
+            if ($skipImport) {
+              Write-Host "  ⏭ Version already current in $envName — import will be skipped" -ForegroundColor Yellow
+            }
+          } elseif ($isMock) {
+            Write-Host "  [MOCK] Version compare skipped" -ForegroundColor Cyan
+          } else {
+            Write-Host "  enable_version_compare=false — skipping"
+          }
+
+          Write-Host "  ✓ [$name] All pre-flight checks passed (skip_import=$skipImport)"
+          Write-Host "::endgroup::"
+
+          $results.Add(@{
+            name             = $name
+            skipImport       = $skipImport
+            settingsResolved = $settingsResolved
+            managedZip       = $managedZip
+          })
+        }
+
+        # Write pre-flight results for the deploy loop to consume
+        $results | ConvertTo-Json -Depth 5 | Set-Content "preflight-results.json" -Encoding UTF8
+
+        Write-Host ""
+        Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        Write-Host "  ✅ All pre-flight checks passed for $($solutions.Count) solution(s)"
+        Write-Host "     ServiceNow change request will now be opened (if enabled)"
+        Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    # ── STEP C: ServiceNow Pre-Deploy (Open CR + Approval Gate) ──────────────
+    # Only reached after ALL pre-flight checks have passed.
+    # Blocks the pipeline until the SNOW change request is approved.
+    - name: ServiceNow — Pre-Deploy (Open CR + Approval Gate)
+      if: ${{ inputs.enable_servicenow == 'true' }}
+      uses: ppudot2-cloud/GHA-Core/.github/actions/dynamics/servicenow-change@main
+      with:
+        phase:            pre-deploy
+        environment_name: ${{ inputs.environment_name }}
+        solution_list:    ${{ inputs.solution_list }}
+        sarif_path:       ${{ inputs.sarif_path }}
+        mock_deploy:      ${{ inputs.mock_deploy }}
+
+    # ── STEP D: Deploy loop (ALL solutions, SNOW already approved) ─────────────
+    # Reads preflight-results.json for per-solution skip_import flags and
+    # resolved settings paths written by the pre-flight step.
     - name: Deploy solutions → ${{ inputs.environment_name }}
       shell: pwsh
       env:
@@ -167,151 +347,64 @@ runs:
         ENVIRONMENT_URL:           ${{ inputs.environment_url }}
         SOLUTION_TYPE:             ${{ inputs.solution_type }}
         ENABLE_BACKUP:             ${{ inputs.enable_backup }}
-        ENABLE_BLOCKING_CHECK:     ${{ inputs.enable_blocking_check }}
-        ENABLE_VERSION_COMPARE:    ${{ inputs.enable_version_compare }}
         IMPORT_CONFIG_DATA:        ${{ inputs.import_config_data }}
         ACTIVATE_FLOWS:            ${{ inputs.activate_flows }}
         MOCK_DEPLOY:               ${{ inputs.mock_deploy }}
         TAG_PROD_DEPLOYED:         ${{ inputs.tag_prod_deployed }}
-        BASE_SOLUTIONS:            ${{ inputs.base_solutions }}
         JFROG_URL:                 ${{ inputs.jfrog_url }}
         JFROG_REPO:                ${{ inputs.jfrog_repo }}
         RUN_NUMBER:                ${{ inputs.run_number }}
         RUN_ATTEMPT:               ${{ inputs.run_attempt }}
-        PREVIOUS_ENV_URL:          ${{ inputs.previous_environment_url }}
       run: |
         Set-StrictMode -Version Latest
         $ErrorActionPreference = 'Stop'
 
-        # ── Helpers ──────────────────────────────────────────────────────────────
-        $scriptsDir  = "$env:GITHUB_WORKSPACE/.ci/.github/scripts/dynamics"
-        $isMock      = $env:MOCK_DEPLOY -eq 'true'
-        $envName     = $env:ENVIRONMENT_NAME
-        $envUrl      = $env:ENVIRONMENT_URL
-        $envLower    = $envName.ToLower()
+        $scriptsDir = "$env:GITHUB_WORKSPACE/.ci/.github/scripts/dynamics"
+        $isMock     = $env:MOCK_DEPLOY -eq 'true'
+        $envName    = $env:ENVIRONMENT_NAME
+        $envUrl     = $env:ENVIRONMENT_URL
 
-        # SOLUTIONS_JSON is the matrix object {"solution":[...]} — extract the array
         $parsed    = $env:SOLUTIONS_JSON | ConvertFrom-Json
         $solutions = if ($parsed.solution) { $parsed.solution } else { $parsed }
-        $failed    = [System.Collections.Generic.List[string]]::new()
+
+        # Load pre-flight results written by the pre-flight step
+        if (-not (Test-Path "preflight-results.json")) {
+          throw "preflight-results.json not found. The pre-flight step must run before this step."
+        }
+        $preflightData = Get-Content "preflight-results.json" -Raw | ConvertFrom-Json
+        # Build lookup hashtable keyed by solution name
+        $preflight = @{}
+        foreach ($r in $preflightData) {
+          $preflight[$r.name] = $r
+        }
+
+        $failed = [System.Collections.Generic.List[string]]::new()
 
         Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        Write-Host "  Deploying $($solutions.Count) solution(s) → $envName"
+        Write-Host "  DEPLOYING $($solutions.Count) solution(s) → $envName"
+        Write-Host "  (Pre-flight checks passed • ServiceNow CR approved)"
         Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
         foreach ($sol in $solutions) {
-          $name         = $sol.name
-          $prefix       = if ($sol.deployment_settings_prefix) { $sol.deployment_settings_prefix } else { 'deployment-settings' }
-          $artifactName = "${name}_$($env:RUN_NUMBER)_$($env:RUN_ATTEMPT)"
-          $settingsFile = "$prefix/$envLower/$name.json"
-          $outDir       = "out/$name"
-          $managedZip   = (Get-ChildItem -Path $outDir -Filter "*_managed.zip" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName)
-          $settingsResolved = "$outDir/deployment-settings-resolved.json"
-          $dataZip      = "config-data/$name-data.zip"
-          $backupDir    = "backup"
-          $skipImport   = $false
+          $name       = $sol.name
+          $outDir     = "out/$name"
+          $dataZip    = "config-data/$name-data.zip"
+          $backupDir  = "backup"
+
+          # Read pre-flight results for this solution
+          $pf               = $preflight[$name]
+          $skipImport       = [bool]$pf.skipImport
+          $managedZip       = $pf.managedZip
+          $settingsResolved = $pf.settingsResolved
 
           Write-Host ""
           Write-Host "::group::[$name] Deploy → $envName"
 
           try {
-            # ── 1. Verify artifact present (pre-downloaded by calling job) ─────
-            # _stage-deploy-chain runs actions/download-artifact before this action,
-            # placing solution-artifact-* into the workspace. JFrog is NOT used here.
-            Write-Host "[$name] Step 1/10 — Verify artifact present"
-            if ($isMock) {
-              Write-Host "  [MOCK] Skipping artifact check" -ForegroundColor Cyan
-              New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-              $managedZip = "$outDir/${name}_mock_managed.zip"
-              New-Item -ItemType File     -Force -Path $managedZip | Out-Null  # placeholder
-            } else {
-              if (-not (Test-Path $managedZip)) {
-                throw "Managed ZIP not found at '$managedZip'. Ensure the download-artifact step in the calling job succeeded and the artifact name matches 'solution-artifact-$name'."
-              }
-              Write-Host "  ✓ Artifact found at $managedZip"
-            }
-
-            # ── 2. Resolve deployment-settings tokens ──────────────────────────
-            Write-Host "[$name] Step 2/11 — Resolve deployment settings"
-            if ((Test-Path $settingsFile) -and -not $isMock) {
-              $content = Get-Content $settingsFile -Raw
-              $matches  = [regex]::Matches($content, '#\{([^}]+)\}#')
-              foreach ($m in $matches) {
-                $varName  = $m.Groups[1].Value
-                $varValue = [System.Environment]::GetEnvironmentVariable($varName)
-                if ($null -ne $varValue) {
-                  $content = $content.Replace($m.Value, $varValue)
-                } else {
-                  Write-Warning "  Token $($m.Value) has no env var '$varName' — leaving unreplaced"
-                }
-              }
-              New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-              $content | Set-Content $settingsResolved -Encoding UTF8
-              Write-Host "  Resolved settings written to: $settingsResolved"
-            } else {
-              $settingsResolved = ''
-              if ($isMock) { Write-Host "  [MOCK] Token resolution skipped" -ForegroundColor Cyan }
-              else          { Write-Host "  No settings file at $settingsFile — skipping token resolution" -ForegroundColor Yellow }
-            }
-
-            # ── 3. Verify base solutions ───────────────────────────────────────
-            Write-Host "[$name] Step 3/11 — Verify base solutions"
-            if ($env:BASE_SOLUTIONS -ne '' -and -not $isMock) {
-              $bases = $env:BASE_SOLUTIONS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
-              foreach ($base in $bases) {
-                Write-Host "  Verifying '$base' is installed in $envName..."
-                $list = pac solution list --environment $envUrl 2>&1
-                if ($list -notmatch [regex]::Escape($base)) {
-                  throw "Base solution '$base' not found in $envName. Cannot deploy $name."
-                }
-                Write-Host "  ✓ '$base' found"
-              }
-            } elseif ($isMock) {
-              Write-Host "  [MOCK] Base solution check skipped" -ForegroundColor Cyan
-            } else {
-              Write-Host "  No base solutions specified — skipping"
-            }
-
-            # ── 4. Blocking check ──────────────────────────────────────────────
-            Write-Host "[$name] Step 4/11 — Blocking check"
-            if ($env:ENABLE_BLOCKING_CHECK -eq 'true' -and -not $isMock) {
-              & "$scriptsDir/Invoke-BlockingCheck.ps1" `
-                -EnvironmentUrl  $envUrl `
-                -EnvironmentName $name `
-                -AppId         $env:PP_APP_ID `
-                -ClientSecret  $env:PP_CLIENT_SECRET `
-                -TenantId      $env:PP_TENANT_ID
-            } elseif ($isMock) {
-              Write-Host "  [MOCK] Blocking check skipped" -ForegroundColor Cyan
-            } else {
-              Write-Host "  enable_blocking_check=false — skipping"
-            }
-
-            # ── 5. Version compare ─────────────────────────────────────────────
-            Write-Host "[$name] Step 5/11 — Version compare"
-            if ($env:ENABLE_VERSION_COMPARE -eq 'true' -and -not $isMock) {
-              $result = & "$scriptsDir/Compare-SolutionVersion.ps1" `
-                -SolutionName           $name `
-                -ArtifactFolder         $outDir `
-                -PreviousEnvironmentUrl $env:PREVIOUS_ENV_URL `
-                -TargetEnvironmentUrl   $envUrl `
-                -AppId                  $env:PP_APP_ID `
-                -ClientSecret           $env:PP_CLIENT_SECRET `
-                -TenantId               $env:PP_TENANT_ID
-              $skipImport = ($result -eq 'true')
-              if ($skipImport) {
-                Write-Host "  ⏭ Version already current — import will be skipped" -ForegroundColor Yellow
-              }
-            } elseif ($isMock) {
-              Write-Host "  [MOCK] Version compare skipped" -ForegroundColor Cyan
-            } else {
-              Write-Host "  enable_version_compare=false — skipping"
-            }
-
-            # ── 6. Find solution in target environment ────────────────────────────
-            Write-Host "[$name] Step 6/14 — Find solution in $envName"
-            $solutionExists     = $false
-            $installedVersion   = ''
+            # ── 6. Find solution in target environment ─────────────────────────
+            Write-Host "[$name] Step 6/8 — Find solution in $envName"
+            $solutionExists   = $false
+            $installedVersion = ''
             if ($isMock) {
               Write-Host "  [MOCK] Solution lookup simulated — treating as first install" -ForegroundColor Cyan
             } else {
@@ -319,42 +412,25 @@ runs:
                 $listRaw  = pac solution list --environment $envUrl --json 2>&1
                 $allSols  = $listRaw | ConvertFrom-Json
                 $existing = $allSols | Where-Object {
-                  ($_.SolutionUniqueName -ieq $name) -or
-                  ($_.UniqueName         -ieq $name) -or
-                  ($_.solutionUniqueName -ieq $name) -or
-                  ($_.uniqueName         -ieq $name)
+                  ($_.SolutionUniqueName -ieq $name) -or ($_.UniqueName -ieq $name)
                 }
                 if ($existing) {
                   $solutionExists   = $true
                   $installedVersion = $existing.Version ?? $existing.version ?? 'unknown'
-                  Write-Host "  ✅ Found '$name' in $envName — installed version: $installedVersion"
-                  Write-Host "     → This is an UPGRADE"
+                  Write-Host "  ✅ Found '$name' in $envName — installed: $installedVersion → UPGRADE"
                 } else {
-                  Write-Host "  ℹ️  '$name' not found in $envName — this is a FIRST INSTALL"
+                  Write-Host "  ℹ️  '$name' not found in $envName → FIRST INSTALL"
                 }
               } catch {
-                Write-Warning "  Could not query solution list: $_"
-                Write-Warning "  Continuing — assuming solution may or may not exist"
+                Write-Warning "  Could not query solution list: $_ — continuing (assuming may or may not exist)"
               }
             }
-
-            # ── Determine effective upgrade mode ──────────────────────────────────
-            # Auto-select: upgrade if solution already exists, install if first time.
-            # Mock mode: no env query was made, so $solutionExists is always false → simulate install.
             $effectiveUpgrade = $solutionExists
             $importMode = if ($effectiveUpgrade) { 'UPGRADE (holding solution)' } else { 'INSTALL (standard)' }
-            $modeSource = if ($solutionExists) {
-              'auto-detected: solution already exists'
-            } else {
-              'auto-detected: first install'
-            }
-            Write-Host "  → Import mode: $importMode ($modeSource)"
+            Write-Host "  → Import mode: $importMode"
 
             # ── 7. Backup ──────────────────────────────────────────────────────
-            # Only taken on upgrades (solution already installed). First installs
-            # have nothing to export — skip silently so auto-rollback is not
-            # attempted on a fresh install failure either.
-            Write-Host "[$name] Step 7/14 — Backup"
+            Write-Host "[$name] Step 7/8 — Backup"
             if ($env:ENABLE_BACKUP -eq 'true' -and -not $skipImport -and $solutionExists) {
               if ($isMock) {
                 Write-Host "  [MOCK] Backup of $name from $envName simulated" -ForegroundColor Cyan
@@ -362,11 +438,7 @@ runs:
                 New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
                 $backupPath = "$backupDir/${name}_${envName}_backup.zip"
                 Write-Host "  Exporting backup → $backupPath"
-                pac solution export `
-                  --name        $name `
-                  --path        $backupPath `
-                  --managed `
-                  --environment $envUrl
+                pac solution export --name $name --path $backupPath --managed --environment $envUrl
                 Write-Host "  ✓ Backup exported"
               }
             } elseif ($env:ENABLE_BACKUP -eq 'true' -and -not $solutionExists -and -not $skipImport) {
@@ -377,25 +449,18 @@ runs:
               Write-Host "  enable_backup=false — skipping"
             }
 
-            # ── 7. Import solution ─────────────────────────────────────────────
-            Write-Host "[$name] Step 8/14 — Import solution"
+            # ── 8. Import solution ─────────────────────────────────────────────
+            Write-Host "[$name] Step 8/8 — Import"
             if ($skipImport) {
               Write-Host "  ⏭ Import skipped — version already current" -ForegroundColor Yellow
             } elseif ($isMock) {
               Write-Host "  [MOCK] Import of $name → $envName simulated" -ForegroundColor Cyan
               Write-Host "    solution_type : $($env:SOLUTION_TYPE)"
-              Write-Host "    import mode   : $importMode"
+              Write-Host "    import_mode   : $importMode"
               Write-Host "    settings_file : $settingsResolved"
             } else {
-              $importArgs = @(
-                'solution', 'import',
-                '--path',          $managedZip,
-                '--environment',   $envUrl,
-                '--force-overwrite'
-              )
-              if ($settingsResolved -ne '') {
-                $importArgs += @('--settings-file', $settingsResolved)
-              }
+              $importArgs = @('solution','import','--path',$managedZip,'--environment',$envUrl,'--force-overwrite')
+              if ($settingsResolved -ne '') { $importArgs += @('--settings-file', $settingsResolved) }
               if ($effectiveUpgrade) {
                 $importArgs += '--import-as-holding'
                 Write-Host "  Importing as holding (stage-and-upgrade)..."
@@ -403,16 +468,14 @@ runs:
                 Write-Host "  Importing (standard install)..."
               }
               pac @importArgs
-
-              # Apply upgrade after holding import
               if ($effectiveUpgrade) {
                 Write-Host "  Applying solution upgrade..."
                 pac solution upgrade --solution-name $name --environment $envUrl --async
               }
             }
 
-            # ── 8. Import configuration data ───────────────────────────────────
-            Write-Host "[$name] Step 9/14 — Config data"
+            # ── 9. Import configuration data ───────────────────────────────────
+            Write-Host "[$name] Step 9 — Config data"
             if ($env:IMPORT_CONFIG_DATA -eq 'true' -and -not $skipImport) {
               if ($isMock) {
                 Write-Host "  [MOCK] Config data import simulated" -ForegroundColor Cyan
@@ -427,12 +490,12 @@ runs:
               Write-Host "  import_config_data=false or import skipped — skipping"
             }
 
-            # ── 9. Publish customizations ──────────────────────────────────────
-            Write-Host "[$name] Step 10/14 — Publish customizations"
+            # ── 10. Publish customizations ─────────────────────────────────────
+            Write-Host "[$name] Step 10 — Publish customizations"
             if ($skipImport) {
-              Write-Host "  Publish skipped — import skipped (version already current)"
+              Write-Host "  Publish skipped — import skipped"
             } elseif ($effectiveUpgrade) {
-              Write-Host "  Publish skipped — upgrade pattern publishes during apply-upgrade"
+              Write-Host "  Publish skipped — upgrade publishes atomically via apply-upgrade"
             } elseif ($isMock) {
               Write-Host "  [MOCK] Publish customizations simulated" -ForegroundColor Cyan
             } else {
@@ -441,170 +504,92 @@ runs:
               Write-Host "  ✓ Customizations published"
             }
 
-            # ── 10. Activate Flows and Classic Workflows ──────────────────────
-            # TWO activation paths run in sequence:
-            #   A. Power Automate cloud flows  — identified by .json files in the
-            #      solution's Workflows folder. Activated via PAC CLI flow enable.
-            #   B. Classic Dynamics 365 workflows — identified by .xaml files in
-            #      the solution's Workflows folder. Activated via Dataverse Web API
-            #      PATCH (statecode=1, statuscode=2).
-            #
-            # The solution ZIP is extracted to a temp folder first so both paths
-            # can read the exact workflow/flow definitions shipped in this artifact
-            # rather than querying the environment (which may have extras).
-            Write-Host "[$name] Step 11/14 — Extract solution + activate flows & classic workflows"
+            # ── 11. Activate Flows and Classic Workflows ───────────────────────
+            Write-Host "[$name] Step 11 — Activate flows & classic workflows"
             if ($skipImport) {
-              Write-Host "  Activate skipped — import skipped (version already current)"
+              Write-Host "  Activate skipped — import skipped"
             } elseif ($env:ACTIVATE_FLOWS -ne 'true') {
               Write-Host "  activate_flows=false — skipping"
             } elseif ($isMock) {
               Write-Host "  [MOCK] Flow + classic workflow activation simulated" -ForegroundColor Cyan
             } else {
-              # ── Extract solution ZIP ────────────────────────────────────────
               $extractDir = "$outDir/_extracted"
               if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force }
               New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
-
-              # Prefer managed ZIP (same content for workflows); fall back to unmanaged
               $zipToExtract = $managedZip
               if (-not (Test-Path $zipToExtract)) {
                 $zipToExtract = (Get-ChildItem -Path $outDir -Filter "*_unmanaged.zip" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName)
               }
-
               if (-not $zipToExtract -or -not (Test-Path $zipToExtract)) {
                 Write-Warning "  No solution ZIP found at '$outDir' — skipping flow activation"
               } else {
                 Expand-Archive -LiteralPath $zipToExtract -DestinationPath $extractDir -Force
-                Write-Host "  ✓ Extracted: $zipToExtract → $extractDir"
-
+                Write-Host "  ✓ Extracted: $zipToExtract"
                 $workflowsDir = Join-Path $extractDir "Workflows"
 
-                # ── A. Power Automate cloud flows (.json) ───────────────────
+                # A. Power Automate cloud flows (.json)
                 Write-Host "  [A] Power Automate cloud flows (.json)"
-                $flowFiles = if (Test-Path $workflowsDir) {
-                  Get-ChildItem -Path $workflowsDir -Filter "*.json" -ErrorAction SilentlyContinue
-                } else { @() }
-
+                $flowFiles = if (Test-Path $workflowsDir) { Get-ChildItem -Path $workflowsDir -Filter "*.json" -ErrorAction SilentlyContinue } else { @() }
                 if ($flowFiles.Count -gt 0) {
-                  Write-Host "    Found $($flowFiles.Count) cloud flow definition(s)"
                   $activatedFlows = 0; $skippedFlows = 0
                   foreach ($ff in $flowFiles) {
-                    # Filename pattern: {DisplayName}_{flowid}.json
-                    # Extract GUID from the end of the filename (before .json)
                     $flowId = $null
                     if ($ff.BaseName -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$') {
                       $flowId = $matches[1]
                     }
-                    if (-not $flowId) {
-                      Write-Warning "    Could not extract flow ID from filename: $($ff.Name) — skipping"
-                      continue
-                    }
-                    Write-Host "    ▶ Enabling flow: $($ff.BaseName)"
-                    try {
-                      pac flow enable --flow-id $flowId --environment $envUrl
-                      $activatedFlows++
-                    } catch {
-                      Write-Warning "    Could not enable flow $flowId`: $_ (may already be active)"
-                      $skippedFlows++
-                    }
+                    if (-not $flowId) { Write-Warning "    Cannot extract flow ID from $($ff.Name) — skipping"; continue }
+                    try { pac flow enable --flow-id $flowId --environment $envUrl; $activatedFlows++ }
+                    catch { Write-Warning "    Could not enable flow $flowId`: $_"; $skippedFlows++ }
                   }
-                  Write-Host "    ✓ Cloud flows: $activatedFlows enabled, $skippedFlows skipped/already active"
-                } else {
-                  Write-Host "    No cloud flow files (.json) found in solution"
-                }
+                  Write-Host "    ✓ Cloud flows: $activatedFlows enabled, $skippedFlows skipped"
+                } else { Write-Host "    No cloud flow files (.json) found" }
 
-                # ── B. Classic Dynamics 365 workflows (.xaml) ───────────────
+                # B. Classic Dynamics 365 workflows (.xaml)
                 Write-Host "  [B] Classic Dynamics 365 workflows (.xaml)"
-                $xamlFiles = if (Test-Path $workflowsDir) {
-                  Get-ChildItem -Path $workflowsDir -Filter "*.xaml" -ErrorAction SilentlyContinue
-                } else { @() }
-
+                $xamlFiles = if (Test-Path $workflowsDir) { Get-ChildItem -Path $workflowsDir -Filter "*.xaml" -ErrorAction SilentlyContinue } else { @() }
                 if ($xamlFiles.Count -gt 0) {
-                  Write-Host "    Found $($xamlFiles.Count) classic workflow definition(s)"
-
-                  # Get bearer token for Dataverse Web API calls
-                  # Uses the same PP service principal credentials fetched from AKV
                   $tokenUrl  = "https://login.microsoftonline.com/$env:PP_TENANT_ID/oauth2/v2.0/token"
-                  $tokenBody = @{
-                    grant_type    = 'client_credentials'
-                    client_id     = $env:PP_APP_ID
-                    client_secret = $env:PP_CLIENT_SECRET
-                    scope         = "$envUrl/.default"
-                  }
-                  $tokenResp = Invoke-RestMethod -Uri $tokenUrl -Method POST -Body $tokenBody
-                  $bearerToken = $tokenResp.access_token
-                  Write-Host "    ✓ Bearer token acquired for Dataverse Web API"
-
-                  $apiHeaders = @{
-                    Authorization    = "Bearer $bearerToken"
-                    'OData-MaxVersion' = '4.0'
-                    'OData-Version'    = '4.0'
-                    Accept           = 'application/json'
-                    'Content-Type'   = 'application/json'
-                  }
+                  $tokenBody = @{ grant_type='client_credentials'; client_id=$env:PP_APP_ID; client_secret=$env:PP_CLIENT_SECRET; scope="$envUrl/.default" }
+                  $bearerToken = (Invoke-RestMethod -Uri $tokenUrl -Method POST -Body $tokenBody).access_token
+                  $apiHeaders  = @{ Authorization="Bearer $bearerToken"; 'OData-MaxVersion'='4.0'; 'OData-Version'='4.0'; Accept='application/json'; 'Content-Type'='application/json' }
                   $activatedWf = 0; $skippedWf = 0
-
                   foreach ($xf in $xamlFiles) {
-                    # Filename pattern: {DisplayName}_{workflowid}.xaml
                     $wfId = $null
-                    if ($xf.BaseName -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$') {
-                      $wfId = $matches[1]
-                    }
-                    if (-not $wfId) {
-                      Write-Warning "    Could not extract workflow ID from filename: $($xf.Name) — skipping"
-                      continue
-                    }
-
-                    Write-Host "    Checking: $($xf.BaseName)"
+                    if ($xf.BaseName -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$') { $wfId = $matches[1] }
+                    if (-not $wfId) { Write-Warning "    Cannot extract workflow ID from $($xf.Name) — skipping"; continue }
                     try {
-                      # Query current state before patching
-                      $checkUrl  = "$envUrl/api/data/v9.2/workflows($wfId)?`$select=name,statecode,statuscode"
-                      $wfRecord  = Invoke-RestMethod -Uri $checkUrl -Headers $apiHeaders -Method GET
-                      $stateName = if ($wfRecord.statecode -eq 1) { 'Active' } else { "Inactive (statecode=$($wfRecord.statecode))" }
-                      Write-Host "      Current state: $stateName"
-
-                      if ($wfRecord.statecode -eq 1) {
-                        Write-Host "      ⏭ Already active: $($wfRecord.name)"
-                        $skippedWf++
-                      } else {
-                        # Activate: statecode=1 (Active), statuscode=2 (Activated)
-                        $patchUrl  = "$envUrl/api/data/v9.2/workflows($wfId)"
-                        $patchBody = '{"statecode":1,"statuscode":2}' | ConvertFrom-Json | ConvertTo-Json
-                        Invoke-RestMethod -Uri $patchUrl -Headers $apiHeaders -Method PATCH -Body $patchBody | Out-Null
-                        Write-Host "      ▶ Activated: $($wfRecord.name)"
-                        $activatedWf++
+                      $wfRecord = Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/workflows($wfId)?`$select=name,statecode,statuscode" -Headers $apiHeaders -Method GET
+                      if ($wfRecord.statecode -eq 1) { Write-Host "      ⏭ Already active: $($wfRecord.name)"; $skippedWf++ }
+                      else {
+                        Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/workflows($wfId)" -Headers $apiHeaders -Method PATCH -Body '{"statecode":1,"statuscode":2}' | Out-Null
+                        Write-Host "      ▶ Activated: $($wfRecord.name)"; $activatedWf++
                       }
-                    } catch {
-                      Write-Warning "      Failed to activate workflow $wfId`: $_"
-                    }
+                    } catch { Write-Warning "      Failed to activate workflow $wfId`: $_" }
                   }
                   Write-Host "    ✓ Classic workflows: $activatedWf activated, $skippedWf already active"
-                } else {
-                  Write-Host "    No classic workflow files (.xaml) found in solution"
-                }
+                } else { Write-Host "    No classic workflow files (.xaml) found" }
 
-                # Cleanup extraction folder
                 Remove-Item $extractDir -Recurse -Force -ErrorAction SilentlyContinue
               }
             }
 
-            # ── 11. JFrog Prod tag ─────────────────────────────────────────────
-            Write-Host "[$name] Step 12/14 — JFrog Prod tag"
+            # ── 12. JFrog Prod tag ─────────────────────────────────────────────
+            Write-Host "[$name] Step 12 — JFrog Prod tag"
             if ($env:TAG_PROD_DEPLOYED -eq 'true' -and -not $isMock -and $env:JFROG_URL -ne '') {
-              Write-Host "  Tagging $artifactName as prodDeployed in JFrog..."
               & "$scriptsDir/Invoke-JFrogAction.ps1" `
-                -Action          "tag" `
-                -SolutionName    $name `
-                -RepoName        $env:GITHUB_REPOSITORY `
-                -JFrogUrl        $env:JFROG_URL `
-                -JFrogRepo       $env:JFROG_REPO `
-                -RunNumber       $env:RUN_NUMBER `
-                -RunAttempt      $env:RUN_ATTEMPT `
-                -JFrogToken      $env:JFROG_TOKEN `
-                -TagProperties   "prodDeployed=true"
+                -Action        "tag" `
+                -SolutionName  $name `
+                -RepoName      $env:GITHUB_REPOSITORY `
+                -JFrogUrl      $env:JFROG_URL `
+                -JFrogRepo     $env:JFROG_REPO `
+                -RunNumber     $env:RUN_NUMBER `
+                -RunAttempt    $env:RUN_ATTEMPT `
+                -JFrogToken    $env:JFROG_TOKEN `
+                -TagProperties "prodDeployed=true"
             }
-            # ── 12. Deploy summary ─────────────────────────────────────────────
-            Write-Host "[$name] Step 13/14 — Deploy summary"
+
+            # ── 13. Deploy summary ─────────────────────────────────────────────
+            Write-Host "[$name] Step 13 — Deploy summary"
             & "$scriptsDir/Write-DeploySummary.ps1" `
               -SolutionName    $name `
               -EnvironmentName $envName `
@@ -612,39 +597,31 @@ runs:
               -RunNumber       $env:RUN_NUMBER `
               -MockDeploy:$isMock
 
-            Write-Host "  ✅ [$name] Deployed successfully → $envName (publish ✓, flows activated ✓)"
+            Write-Host "  ✅ [$name] Deployed successfully → $envName"
 
           } catch {
             $failed.Add($name)
             Write-Error "❌ [$name] Failed to deploy to $envName`: $_"
 
-            # ── Inline auto-rollback ───────────────────────────────────────────
-            # Only attempted when enable_backup=true AND this was an upgrade
-            # (backup only exists for upgrades — first-install failures have
-            # nothing to restore to).
+            # Inline auto-rollback — only for upgrades where a backup was taken
             if ($env:ENABLE_BACKUP -eq 'true' -and $solutionExists) {
               $backupPath = "$backupDir/${name}_${envName}_backup.zip"
               if (-not $isMock -and (Test-Path $backupPath)) {
                 Write-Host ""
                 Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Yellow
                 Write-Host "  ⚠️  AUTO-ROLLBACK — [$name] → $envName" -ForegroundColor Yellow
-                Write-Host "  Restoring previous version from: $backupPath" -ForegroundColor Yellow
+                Write-Host "  Restoring: $backupPath" -ForegroundColor Yellow
                 Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Yellow
                 try {
-                  pac solution import `
-                    --path          $backupPath `
-                    --environment   $envUrl `
-                    --force-overwrite
-                  Write-Host "  ✅ [$name] Rollback succeeded — previous version restored to $envName" -ForegroundColor Green
+                  pac solution import --path $backupPath --environment $envUrl --force-overwrite
+                  Write-Host "  ✅ [$name] Rollback succeeded — previous version restored" -ForegroundColor Green
                 } catch {
-                  Write-Error "  ❌ [$name] Auto-rollback also failed: $_"
-                  Write-Error "  $envName may be in a broken state. Manual intervention required."
+                  Write-Error "  ❌ [$name] Auto-rollback also failed: $_ — manual intervention required"
                 }
               } elseif ($isMock) {
                 Write-Host "  [MOCK] Auto-rollback simulated for $name → $envName" -ForegroundColor Cyan
               } else {
                 Write-Warning "  [$name] enable_backup=true but backup file not found at $backupPath"
-                Write-Warning "  This should not happen for an upgrade — check whether the backup step succeeded."
               }
             } else {
               Write-Host "  [$name] enable_backup=false or first install — no auto-rollback" -ForegroundColor Yellow
@@ -657,20 +634,17 @@ runs:
         Write-Host ""
         Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         if ($failed.Count -gt 0) {
-          # Write deploy status for ServiceNow post-deploy closure
           "SNOW_DEPLOY_STATUS=failure" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Error "Deploy to $envName FAILED for: $($failed -join ', ')"
           exit 1
         }
-        # Write deploy status for ServiceNow post-deploy closure
         "SNOW_DEPLOY_STATUS=success" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
         Write-Host "  ✅ All $($solutions.Count) solution(s) deployed → $envName"
         Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-    # ── ServiceNow Post-Deploy: Steps 12-14 (approvers → status → close CR) ─
+    # ── STEP E: ServiceNow Post-Deploy ────────────────────────────────────────
     # Always runs (if: always()) so the CR is closed even when deployment fails.
     # Reads SNOW_DEPLOY_STATUS written by the deploy loop above.
-    # Reads SNOW_CHANGE_REQUEST_ID written by the pre-deploy step.
     # No-op if pre-deploy never ran (SNOW_CHANGE_REQUEST_ID will be empty).
     - name: ServiceNow — Post-Deploy (Find Approvers + Detect Status + Close CR)
       if: ${{ always() && inputs.enable_servicenow == 'true' }}
@@ -680,9 +654,7 @@ runs:
         environment_name: ${{ inputs.environment_name }}
         mock_deploy:      ${{ inputs.mock_deploy }}
 
-    # ── Upload backup artifacts (all solutions for this env, one artifact) ────
-    # One artifact per environment per run — rollback downloads this and locates
-    # the specific solution ZIP by filename pattern: {SolutionName}_{Env}_backup.zip
+    # ── STEP F: Upload backup artifacts ──────────────────────────────────────
     - name: Upload backup artifact — ${{ inputs.environment_name }}
       if: ${{ inputs.enable_backup == 'true' && inputs.mock_deploy != 'true' }}
       uses: actions/upload-artifact@v4
