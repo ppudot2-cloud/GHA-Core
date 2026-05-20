@@ -477,7 +477,7 @@ Calls `Invoke-JFrogAction.ps1 upload` with the managed ZIP, unmanaged ZIP, and S
 
 ## 4. GHA-Core PowerShell Scripts
 
-All scripts are in `.github/scripts/dynamics/`. On the runner they are at `.ci/.github/scripts/dynamics/` after `ci-bootstrap` runs. All scripts support mock mode.
+All scripts are in `.github/scripts/dynamics/`. On the runner they are at `.ci/.github/scripts/dynamics/` after `reveille` runs. All scripts support mock mode.
 
 ### `Resolve-SolutionMatrix.ps1`
 

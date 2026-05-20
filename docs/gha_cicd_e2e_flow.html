@@ -155,7 +155,7 @@
       <ul>
         <li><strong>GHA-Core</strong> — Reusable library: composite actions, reusable workflows, PowerShell scripts</li>
         <li><strong>GHA-Dynamics</strong> — Project caller: trigger workflows, solutions.json, deployment-settings, solution source</li>
-        <li>GHA-Core is checked out at <code>.ci/</code> on every runner by <code>ci-bootstrap</code></li>
+        <li>GHA-Core is checked out at <code>.ci/</code> on every runner by <code>reveille</code></li>
         <li>All business logic lives in GHA-Core — GHA-Dynamics is a thin wrapper</li>
       </ul>
     </div>
@@ -272,9 +272,9 @@
       <tbody>
         <tr><td class="step-num">1</td><td class="step-name">setup</td><td><span class="step-type st-inline">inline</span></td><td>Checks out repo, checkouts GHA-Core to <code>.ci/</code>, runs <code>Resolve-SolutionMatrix.ps1</code> to read <code>solutions.json</code> → outputs matrix JSON and solution list</td></tr>
         <tr><td class="step-num">2</td><td class="step-name">stage-export<br><code>_stage-export.yml</code></td><td><span class="step-type st-action">reusable</span></td><td>Exports solution source from sandbox PP environment via PAC CLI, unpacks into <code>src/solutions/</code>, commits to feature branch. Runs per-solution sequentially.</td></tr>
-        <tr><td class="step-num">3</td><td class="step-name">stage-build<br><code>_stage-build.yml → _job-build.yml</code></td><td><span class="step-type st-action">reusable</span></td><td>Matrix build (parallel per solution): ci-bootstrap → pac-install → pack-solution (version stamp, strip Managed tag, pack ZIPs) → solution-checker → export-config-data → upload artifact → jfrog-upload</td></tr>
-        <tr><td class="step-num">4a</td><td class="step-name">deploy-dev</td><td><span class="step-type st-inline">inline</span></td><td>ci-bootstrap → pac-install → download solution-artifact-* → deploy-all-solutions (Unmanaged, Dev env). Runs <strong>in parallel</strong> with deploy-intg/uat/frs/perf.</td></tr>
-        <tr><td class="step-num">4b</td><td class="step-name">deploy-intg</td><td><span class="step-type st-inline">inline</span></td><td>ci-bootstrap → pac-install → download solution-artifact-* → deploy-all-solutions (Managed, Intg env). Parallel with others.</td></tr>
+        <tr><td class="step-num">3</td><td class="step-name">stage-build<br><code>_stage-build.yml → _job-build.yml</code></td><td><span class="step-type st-action">reusable</span></td><td>Matrix build (parallel per solution): reveille → pac-install → pack-solution (version stamp, strip Managed tag, pack ZIPs) → solution-checker → export-config-data → upload artifact → jfrog-upload</td></tr>
+        <tr><td class="step-num">4a</td><td class="step-name">deploy-dev</td><td><span class="step-type st-inline">inline</span></td><td>reveille → pac-install → download solution-artifact-* → deploy-all-solutions (Unmanaged, Dev env). Runs <strong>in parallel</strong> with deploy-intg/uat/frs/perf.</td></tr>
+        <tr><td class="step-num">4b</td><td class="step-name">deploy-intg</td><td><span class="step-type st-inline">inline</span></td><td>reveille → pac-install → download solution-artifact-* → deploy-all-solutions (Managed, Intg env). Parallel with others.</td></tr>
         <tr><td class="step-num">4c</td><td class="step-name">deploy-uat</td><td><span class="step-type st-inline">inline</span></td><td>Same pattern → deploy-all-solutions (Managed, UAT env). Parallel with others.</td></tr>
         <tr><td class="step-num">4d</td><td class="step-name">deploy-frs</td><td><span class="step-type st-inline">inline</span></td><td>Same pattern → deploy-all-solutions (Managed, FRS env). Parallel with others.</td></tr>
         <tr><td class="step-num">4e</td><td class="step-name">deploy-perf</td><td><span class="step-type st-inline">inline</span></td><td>Same pattern → deploy-all-solutions (Managed, Perf env). Parallel with others.</td></tr>
@@ -339,7 +339,7 @@
       <tbody>
         <tr><td class="step-num">1</td><td class="step-name">guard</td><td><span class="step-type st-inline">inline</span></td><td>Confirms trigger is a merged PR from a <code>feature/*</code> branch or manual dispatch. Only proceeds if <code>pull_request.merged == true</code> and head branch starts with <code>feature/</code>. Logs PR number, branch, commit, and actor.</td></tr>
         <tr><td class="step-num">2</td><td class="step-name">read-context</td><td><span class="step-type st-inline">inline</span></td><td>Checks out main, parses <code>pipeline-context.json</code> → outputs <code>run_id</code>, <code>run_number</code>, <code>matrix</code>, <code>solution_list</code> for downstream jobs</td></tr>
-        <tr><td class="step-num">3</td><td class="step-name">deploy-uat</td><td><span class="step-type st-gate">env gate</span></td><td>Uses <code>environment: UAT</code> (approval gate). ci-bootstrap → pac-install → download artifacts from Pipeline 1 run via <code>run-id</code> → deploy-all-solutions (UAT, Managed)</td></tr>
+        <tr><td class="step-num">3</td><td class="step-name">deploy-uat</td><td><span class="step-type st-gate">env gate</span></td><td>Uses <code>environment: UAT</code> (approval gate). reveille → pac-install → download artifacts from Pipeline 1 run via <code>run-id</code> → deploy-all-solutions (UAT, Managed)</td></tr>
         <tr><td class="step-num">4</td><td class="step-name">deploy-prod</td><td><span class="step-type st-gate">env gate</span></td><td>Only if UAT succeeded. Uses <code>environment: Prod</code> (approval gate). Same steps → deploy-all-solutions (Prod, Managed, <code>import_config_data=true</code>, <code>tag_prod_deployed=true</code>)</td></tr>
         <tr><td class="step-num">5</td><td class="step-name">pipeline-summary</td><td><span class="step-type st-inline">inline</span></td><td>Always runs. Writes summary table, sends failure email notification.</td></tr>
       </tbody>
@@ -437,8 +437,8 @@
   <p style="font-size:12px;color:#374151;margin-bottom:16px;">All composite actions live in <code>GHA-Core/.github/actions/dynamics/</code>. They are referenced as <code>ppudot2-cloud/GHA-Core/.github/actions/dynamics/{name}@main</code>.</p>
   <div class="ref-grid">
     <div class="ref-card">
-      <h4>ci-bootstrap</h4>
-      <div class="path">.github/actions/dynamics/ci-bootstrap/action.yml</div>
+      <h4>reveille</h4>
+      <div class="path">.github/actions/dynamics/reveille/action.yml</div>
       <p>Shared first step for every job. Checks out caller repo (full history), checks out GHA-Core to <code>.ci/</code>, performs Azure OIDC login, fetches AKV secrets (PP credentials, optionally JFrog token), merges global-vars.yml + project-vars.yml into <code>$GITHUB_ENV</code>. Skips Azure/AKV steps in mock mode.</p>
     </div>
     <div class="ref-card">
@@ -496,7 +496,7 @@
 
 <!-- ═══════════════════ SCRIPTS ═══════════════════ -->
 <div class="tab-panel" id="tab-scripts">
-  <p style="font-size:12px;color:#374151;margin-bottom:16px;">All PowerShell scripts live in <code>GHA-Core/.github/scripts/dynamics/</code>. On the runner they are available at <code>.ci/.github/scripts/dynamics/</code> after <code>ci-bootstrap</code> runs.</p>
+  <p style="font-size:12px;color:#374151;margin-bottom:16px;">All PowerShell scripts live in <code>GHA-Core/.github/scripts/dynamics/</code>. On the runner they are available at <code>.ci/.github/scripts/dynamics/</code> after <code>reveille</code> runs.</p>
   <table class="script-table">
     <thead><tr><th>Script</th><th>Called by</th><th>Mock?</th><th>Purpose</th></tr></thead>
     <tbody>
@@ -509,7 +509,7 @@
       <tr><td class="script-name">Invoke-ExportCommitSim.ps1</td><td>export-solution.yml</td><td class="mock-yes">mock only</td><td>Simulates the export-and-commit step: creates stub solution files in <code>src/solutions/</code>, stages them, creates a git commit. No PAC CLI required.</td></tr>
       <tr><td class="script-name">Invoke-BlockingCheck.ps1</td><td>pre-deploy-checks action, deploy-all-solutions</td><td class="mock-yes">✓</td><td>Calls PAC to list in-progress async operations on the target environment. Exits with error if blocking operations found; warns if near threshold.</td></tr>
       <tr><td class="script-name">Compare-SolutionVersion.ps1</td><td>pre-deploy-checks action, deploy-all-solutions</td><td class="mock-yes">✓</td><td>Compares solution version in the built artifact against the version currently installed in the target environment. Sets <code>skip_import</code> flag if versions match.</td></tr>
-      <tr><td class="script-name">Merge-Variables.ps1</td><td>ci-bootstrap action</td><td class="mock-yes">✓</td><td>Reads <code>GHA-Core/.github/config/global-vars.yml</code> and <code>GHA-Dynamics/.github/config/project-vars.yml</code>, merges them (project overrides global), writes all key=value pairs to <code>$GITHUB_ENV</code></td></tr>
+      <tr><td class="script-name">Merge-Variables.ps1</td><td>reveille action</td><td class="mock-yes">✓</td><td>Reads <code>GHA-Core/.github/config/global-vars.yml</code> and <code>GHA-Dynamics/.github/config/project-vars.yml</code>, merges them (project overrides global), writes all key=value pairs to <code>$GITHUB_ENV</code></td></tr>
       <tr><td class="script-name">Invoke-JFrogAction.ps1</td><td>jfrog-upload action, post-deploy action</td><td class="mock-yes">✓</td><td>Handles two operations: <code>upload</code> (push ZIPs to Artifactory with metadata) and <code>tag-prod</code> (set <code>prodDeployed=true;deployedDate=</code> property on existing artifact)</td></tr>
       <tr><td class="script-name">Write-BuildSummary.ps1</td><td>_job-build.yml</td><td class="mock-yes">✓</td><td>Writes a markdown table summarising the build job (version stamped, packs, checker mode, config data mode, JFrog upload) to <code>$GITHUB_STEP_SUMMARY</code>. Optionally writes a JSON record for the consolidated pipeline summary.</td></tr>
       <tr><td class="script-name">Write-DeploySummary.ps1</td><td>post-deploy action, deploy-all-solutions</td><td class="mock-yes">✓</td><td>Writes a per-solution, per-environment deploy result table (import outcome, version, backup, config data, flows activated) to <code>$GITHUB_STEP_SUMMARY</code>.</td></tr>
