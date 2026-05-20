@@ -11,25 +11,25 @@ Shared GitHub Actions library for Power Platform pipelines. Contains all reusabl
 ```
 GHA-Core/
 ├── .github/
-│   ├── workflows/               # Reusable workflows (MUST be at root — GitHub constraint)
-│   │   ├── _job-build.yml       # Single-solution build job
-│   │   ├── _job-rollback.yml    # Single-environment rollback job
-│   │   ├── _stage-build.yml     # Build stage (matrix per solution)
-│   │   ├── _stage-deploy-chain.yml  # Sequential deploy chain (alternative architecture)
-│   │   └── _stage-export.yml    # Export stage
-│   ├── actions/dynamics/        # Composite actions
-│   │   ├── ci-bootstrap/        # Checkout + OIDC login + AKV secrets + merge vars
-│   │   ├── deploy-all-solutions/# Main deploy orchestrator for one environment
-│   │   ├── export-config-data/  # Config migration data export
-│   │   ├── export-solution/     # PAC solution export
-│   │   ├── import-solution/     # PAC solution import (all variants)
-│   │   ├── jfrog-upload/        # JFrog Artifactory upload
-│   │   ├── pac-install/         # Install PAC CLI
-│   │   ├── pack-solution/       # Version stamp + pack ZIPs
-│   │   ├── post-deploy/         # JFrog Prod tag + deploy summary
-│   │   ├── pre-deploy-checks/   # Blocking check + version compare
-│   │   └── solution-checker/    # PAC Solution Checker + SARIF
-│   ├── scripts/dynamics/        # PowerShell scripts (14 scripts)
+│   ├── workflows/                  # Reusable workflows (MUST be at root — GitHub constraint)
+│   │   ├── _job-build.yml          # Single-solution build job
+│   │   ├── _stage-build.yml        # Build stage (matrix per solution) + validate config
+│   │   ├── _stage-deploy-chain.yml # Parallel deploy across environments with approval gates
+│   │   └── _stage-export.yml       # Export stage (sandbox export or skip_export mode)
+│   ├── actions/dynamics/           # Composite actions
+│   │   ├── deploy-all-solutions/   # Main deploy orchestrator for one environment
+│   │   ├── export-config-data/     # Config migration data export
+│   │   ├── export-solution/        # PAC solution export
+│   │   ├── import-solution/        # PAC solution import (all variants)
+│   │   ├── jfrog-upload/           # JFrog Artifactory upload
+│   │   ├── pac-install/            # Install PAC CLI
+│   │   ├── pack-solution/          # Version stamp + pack ZIPs
+│   │   ├── post-deploy/            # JFrog Prod tag + deploy summary
+│   │   ├── pre-deploy-checks/      # Blocking check + version compare
+│   │   ├── reveille/               # CI bootstrap — checkout, OIDC login, AKV secrets, merge vars
+│   │   ├── servicenow-change/      # ServiceNow change request lifecycle (pre/post deploy)
+│   │   └── solution-checker/       # PAC Solution Checker + SARIF
+│   ├── scripts/dynamics/           # PowerShell scripts (14 scripts)
 │   │   ├── Resolve-SolutionMatrix.ps1
 │   │   ├── Set-SolutionVersion.ps1
 │   │   ├── Remove-ManagedTag.ps1
@@ -44,9 +44,21 @@ GHA-Core/
 │   │   ├── Write-BuildSummary.ps1
 │   │   ├── Write-DeploySummary.ps1
 │   │   └── Write-PipelineSummary.ps1
-│   ├── config/
-│   │   └── global-vars.yml      # Org-wide default variables
-│   └── service-now/             # ServiceNow integration placeholders
+│   ├── variables/dynamics/         # Pipeline variable config
+│   │   └── global-vars.yml        # Org-wide default variables + protected keys
+│   └── servicenow/                 # ServiceNow PowerShell module
+│       ├── Classes/
+│       ├── Private/
+│       ├── Public/
+│       └── Tests/
+├── docs/                           # Documentation
+│   ├── PIPELINE_REFERENCE.md
+│   ├── ENTERPRISE_DEVSECOPS_GUIDE.md
+│   ├── ENTERPRISE_IMPLEMENTATION_GUIDE.md
+│   ├── QUICK_START.md
+│   ├── SECRETS_SETUP_GUIDE.md
+│   ├── gha_cicd_e2e_flow.html
+│   └── pipeline-architecture.html
 └── README.md
 ```
 
@@ -54,13 +66,28 @@ GHA-Core/
 
 ## How callers use this repo
 
-1. `ci-bootstrap` checks out GHA-Core to `.ci/` on every runner using `GHA_CORE_PAT`
+1. `reveille` checks out GHA-Core to `.ci/` on every runner using `GHA_CORE_PAT`, then performs Azure OIDC login, fetches AKV secrets, and merges pipeline variables
 2. Workflows are called via `uses: ppudot2-cloud/GHA-Core/.github/workflows/{name}@main`
 3. Actions are called via `uses: ppudot2-cloud/GHA-Core/.github/actions/dynamics/{name}@main`
 4. Scripts are called via `& .ci/.github/scripts/dynamics/{Script}.ps1`
 
 ---
 
+## Rollback
+
+Rollback is handled **inline** by the `deploy-all-solutions` composite action. When `enable_backup=true`, it exports the currently installed solution before importing the new version. If the import fails, the pipeline automatically re-imports the backup — no separate rollback workflow is needed.
+
+---
+
 ## Documentation
 
-Full documentation lives in GHA-Dynamics. See [GHA-Dynamics/docs/PIPELINE_REFERENCE.md](https://github.com/ppudot2-cloud/GHA-Dynamics/blob/main/docs/PIPELINE_REFERENCE.md) for a complete reference of every workflow, action, and script.
+All documentation lives in [`docs/`](docs/) — this is the single authoritative source. GHA-Dynamics project repos link here rather than maintaining their own copies.
+
+| Document | Description |
+|---|---|
+| [QUICK_START.md](docs/QUICK_START.md) | First pipeline run — mock mode through to real deploy |
+| [PIPELINE_REFERENCE.md](docs/PIPELINE_REFERENCE.md) | Every workflow, action, script, and config file explained |
+| [SECRETS_SETUP_GUIDE.md](docs/SECRETS_SETUP_GUIDE.md) | All GitHub secrets, variables, AKV secrets, and per-environment variables |
+| [ENTERPRISE_DEVSECOPS_GUIDE.md](docs/ENTERPRISE_DEVSECOPS_GUIDE.md) | Azure OIDC, Key Vault, federated credentials, full enterprise setup |
+| [ENTERPRISE_IMPLEMENTATION_GUIDE.md](docs/ENTERPRISE_IMPLEMENTATION_GUIDE.md) | Step-by-step production rollout — repo setup, integrations (JFrog / SNOW / MuleSoft), simulation retirement, governance, hardening checklist |
+| [gha_cicd_e2e_flow.html](docs/gha_cicd_e2e_flow.html) | Interactive end-to-end pipeline flow diagram |

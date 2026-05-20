@@ -5,7 +5,7 @@
 #
 # skip_export=false (default — sandbox export mode):
 #   Fans out per solution (parallel) and for each solution:
-#   1. ci-bootstrap    – checkout, Azure OIDC login, AKV secrets, merge vars
+#   1. reveille         – checkout, Azure OIDC login, AKV secrets, merge vars
 #   2. pac-install     – install PAC CLI
 #   3. export-solution – export unmanaged ZIP from sandbox, unpack to source tree
 #   4. upload-artifact – upload unpacked source as exported-source-<name> artifact
@@ -73,8 +73,8 @@ jobs:
 
     steps:
       # ── 1. Bootstrap ──────────────────────────────────────────────────────────
-      - name: CI Bootstrap
-        uses: ppudot2-cloud/GHA-Core/.github/actions/dynamics/ci-bootstrap@main
+      - name: Reveille
+        uses: ppudot2-cloud/GHA-Core/.github/actions/dynamics/reveille@main
         with:
           mock_deploy:            ${{ inputs.mock_deploy }}
           jfrog_enabled:          false

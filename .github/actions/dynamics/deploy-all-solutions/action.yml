@@ -5,7 +5,7 @@
 # (strategy.matrix + environment: + max-parallel:1).
 #
 # Preconditions (handled by the calling job before this action):
-#   • ci-bootstrap has run          → .ci/ checked out, Azure login, AKV secrets in env
+#   • reveille has run               → .ci/ checked out, Azure login, AKV secrets in env
 #   • pac-install has run           → PAC CLI is on $PATH
 #   • download-artifact has run     → solution-artifact-* downloaded to workspace
 #                                     (out/<artifactName>/ and config-data/ are present)
@@ -105,7 +105,7 @@ inputs:
     description: >
       Enable ServiceNow change management for this deployment.
       When true: opens a CR before deployment, polls for approval, and closes the
-      CR after deployment. Must have servicenow_enabled=true in ci-bootstrap so
+      CR after deployment. Must have servicenow_enabled=true in reveille so
       AKV credentials (SERVICENOWMURI, SNOW_OAUTH_CLIENT_ID/SECRET) are available.
       Non-prod: optional — pass true to enable. Default false.
       Prod: always 'true' — hardcoded by the caller, no user override.

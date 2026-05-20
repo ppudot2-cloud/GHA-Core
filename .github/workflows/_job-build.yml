@@ -2,7 +2,7 @@
 # _job-build.yml  —  Reusable BUILD job
 #
 # Orchestrates composite actions in .github/scripts/dynamics/:
-#   1. ci-bootstrap       – checkout, Azure login, AKV secrets, merge vars
+#   1. reveille            – checkout, Azure login, AKV secrets, merge vars
 #   2. pac-install        – install PAC CLI
 #   3. (optional) download-artifact – fetch exported source from _stage-export
 #   4. pack-solution      – version bump, pack unmanaged + managed ZIPs
@@ -98,8 +98,8 @@ jobs:
 
     steps:
       # ── 1. Bootstrap ──────────────────────────────────────────────────────────
-      - name: CI Bootstrap
-        uses: ppudot2-cloud/GHA-Core/.github/actions/dynamics/ci-bootstrap@main
+      - name: Reveille
+        uses: ppudot2-cloud/GHA-Core/.github/actions/dynamics/reveille@main
         with:
           mock_deploy:            ${{ inputs.mock_deploy }}
           jfrog_enabled:          ${{ inputs.jfrog_url != '' }}

@@ -5,7 +5,7 @@
 # Real mode: uses microsoft/powerplatform-actions/check-solution.
 # Mock mode: uses Invoke-SolutionCheckerSim.ps1 (no PP credentials needed).
 # PP credentials (PP_APP_ID, PP_CLIENT_SECRET, PP_TENANT_ID) are read from
-# GITHUB_ENV — set by the ci-bootstrap action.
+# GITHUB_ENV — set by the reveille action.
 # =============================================================================
 name: 'Solution Checker'
 description: 'Run Power Platform Solution Checker (real or simulated). Always mandatory.'
