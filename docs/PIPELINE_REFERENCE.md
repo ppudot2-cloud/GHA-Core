@@ -35,7 +35,7 @@ These are the entry-point workflows — the ones you trigger or that fire automa
 |---|---|---|---|
 | `mock_deploy` | boolean | false | Skip all Dataverse/JFrog operations; simulate the entire pipeline |
 | `enable_backup` | boolean | false | Take a pre-import backup at each environment before upgrading. If the import fails, the pipeline automatically re-imports the backup to restore the previous version. Recommended: `true` for UAT, FRS, Perf, Prod. |
-| `solutions` | string | `all` | "all" or comma-separated solution names to build and deploy |
+| `solutions` | string | `all` | "all" or comma-separated solution names to build and deploy. Must be declared with `type: string` in the workflow — GitHub only pre-fills `default` values when the type is explicitly set. |
 | `skip_export` | boolean | false | Skip sandbox export — build from source already committed to the current branch. Set automatically when triggered by a push event. |
 | `checker_error_level` | choice | `HighIssue` | Minimum severity that fails Solution Checker |
 | `base_solutions` | string | `''` | Comma-separated base solution names to verify are installed before deployment |
